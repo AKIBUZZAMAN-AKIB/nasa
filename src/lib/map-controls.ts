@@ -21,16 +21,19 @@ import { BEFORE_LAYER_RASTER, HILLSHADE_LAYER } from '$lib/constants';
 import { addOmFileLayers } from './layers';
 import { updateUrl } from './url';
 
-import type { RequestParameters } from 'maplibre-gl';
+import type { AddProtocolAction, RequestParameters } from 'maplibre-gl';
 
 export const createMap = async (container: HTMLElement) => {
 	// MapLibre 6 loads its worker from a URL relative to its own module, which a
 	// bundled app cannot serve (404, blank map). Use the worker bundled by Vite.
 	maplibregl.setWorkerUrl(maplibreWorkerUrl);
 
-	maplibregl.addProtocol('om', (params: RequestParameters, abortController: AbortController) =>
-		omProtocol(params, abortController, get(omProtocolSettings))
-	);
+	// MapLibre 6.11 narrowed `AddProtocolAction` so its response data no longer
+	// allows the `null` that `omProtocol` reports for cancelled or empty tiles.
+	// MapLibre still handles a null payload at runtime (it resolves an empty
+	// response), so keep the behaviour and only align the type here.
+	maplibregl.addProtocol('om', ((params: RequestParameters, abortController: AbortController) =>
+		omProtocol(params, abortController, get(omProtocolSettings))) as AddProtocolAction);
 
 	const style = await getStyle();
 
