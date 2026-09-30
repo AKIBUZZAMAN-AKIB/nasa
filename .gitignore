@@ -9,6 +9,7 @@ node_modules
 /build
 /coverage
 .claude
+.kilo
 
 # OS
 .DS_Store

@@ -20,10 +20,11 @@
 		HillshadeButton,
 		SettingsButton
 	} from '$lib/components/buttons';
+	import { HistoryButton } from '$lib/components/buttons/history-button';
 	import ClippingPanel from '$lib/components/clipping/clipping-panel.svelte';
 	import Dropzone from '$lib/components/dropzone/dropzone.svelte';
-	import GithubCorner from '$lib/components/github/github-corner.svelte';
 	import HelpDialog from '$lib/components/help/help-dialog.svelte';
+	import HistoricalPanel from '$lib/components/history/historical-panel.svelte';
 	import KeyboardHandler from '$lib/components/keyboard/keyboard-handler.svelte';
 	import Spinner from '$lib/components/loading/spinner.svelte';
 	import Scale from '$lib/components/scale/scale.svelte';
@@ -86,6 +87,7 @@
 		$map.on('load', async () => {
 			$map.addControl(darkModeButton);
 			$map.addControl(new SettingsButton());
+			$map.addControl(new HistoryButton());
 			$map.addControl(new HelpButton());
 			$map.addControl(new ClippingButton());
 
@@ -180,10 +182,10 @@
 
 <div class="map maplibregl-map" id="#map_container" bind:this={mapContainer}></div>
 
-<GithubCorner />
 <Scale />
 <SelectionPanel />
 <ClippingPanel bind:this={clippingPanel} />
+<HistoricalPanel />
 <TimeSelector />
 <Settings />
 <HelpDialog />
