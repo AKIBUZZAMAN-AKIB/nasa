@@ -7,6 +7,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import { activeChart } from '$lib/stores/chart';
+	import { initGibsState } from '$lib/stores/gibs';
 	import { map } from '$lib/stores/map';
 	import { initStoredState, loading, url } from '$lib/stores/preferences';
 	import { installRequestCounter } from '$lib/stores/request-counter';
@@ -20,9 +21,11 @@
 		HillshadeButton,
 		SettingsButton
 	} from '$lib/components/buttons';
+	import { GibsButton } from '$lib/components/buttons/gibs-button';
 	import { HistoryButton } from '$lib/components/buttons/history-button';
 	import ClippingPanel from '$lib/components/clipping/clipping-panel.svelte';
 	import Dropzone from '$lib/components/dropzone/dropzone.svelte';
+	import GibsPanel from '$lib/components/gibs/gibs-panel.svelte';
 	import HelpDialog from '$lib/components/help/help-dialog.svelte';
 	import HistoricalPanel from '$lib/components/history/historical-panel.svelte';
 	import KeyboardHandler from '$lib/components/keyboard/keyboard-handler.svelte';
@@ -35,6 +38,7 @@
 	import { unwatchAttributionOverlap, watchAttributionOverlap } from '$lib/attribution';
 	import { getChartPreset } from '$lib/chart-presets';
 	import { postEmbedderReady, startEmbedderBridge, stopEmbedderBridge } from '$lib/embed';
+	import { destroyGibsLayers, initGibsLayers } from '$lib/gibs-layers';
 	import { addOmFileLayers, changeOMfileURL } from '$lib/layers';
 	import {
 		addTerrainSource,
@@ -81,6 +85,7 @@
 		urlParamsToPreferences();
 		await initStoredState();
 
+		initGibsState();
 		await createMap(mapContainer as HTMLElement);
 		startEmbedderBridge();
 
@@ -88,6 +93,7 @@
 			$map.addControl(darkModeButton);
 			$map.addControl(new SettingsButton());
 			$map.addControl(new HistoryButton());
+			$map.addControl(new GibsButton());
 			$map.addControl(new HelpButton());
 			$map.addControl(new ClippingButton());
 
@@ -102,6 +108,9 @@
 			clippingPanel?.initTerraDraw();
 
 			addOmFileLayers();
+			// Satellite history comes from a different provider (NASA GIBS) and
+			// lives below the forecast rasters; it survives style reloads on its own.
+			initGibsLayers();
 			addPopup();
 			changeOMfileURL();
 
@@ -162,6 +171,7 @@
 	});
 
 	onDestroy(() => {
+		destroyGibsLayers();
 		stopEmbedderBridge();
 		unwatchAttributionOverlap();
 		if ($map) {
@@ -186,6 +196,7 @@
 <SelectionPanel />
 <ClippingPanel bind:this={clippingPanel} />
 <HistoricalPanel />
+<GibsPanel />
 <TimeSelector />
 <Settings />
 <HelpDialog />

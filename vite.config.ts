@@ -5,6 +5,22 @@ import { defineConfig, loadEnv } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { Plugin, PreviewServer, ViteDevServer } from 'vite';
 
+/**
+ * Hosts allowed to reach the dev/preview server besides localhost. Vite
+ * rejects unknown `Host` headers to protect against DNS rebinding, which
+ * breaks any setup where the server runs behind a proxy (a sandbox preview,
+ * a tunnel, a LAN name). Set VITE_ALLOWED_HOSTS to a comma-separated list of
+ * hosts — a leading dot matches subdomains, "*" allows any host.
+ */
+const allowedHosts = (value: string | undefined): true | string[] | undefined => {
+	const hosts = value
+		?.split(',')
+		.map((host) => host.trim())
+		.filter(Boolean);
+	if (!hosts?.length) return undefined;
+	return hosts.includes('*') ? true : hosts;
+};
+
 const addHeaders = (res: ServerResponse) => {
 	res.setHeader('Access-Control-Allow-Origin', '*');
 	res.setHeader('Access-Control-Allow-Methods', 'GET');
@@ -42,6 +58,7 @@ export default ({ mode }: { mode: string }) => {
 			]
 		},
 		server: {
+			allowedHosts: allowedHosts(process.env.VITE_ALLOWED_HOSTS),
 			fs: {
 				// Allow serving files from one level up to the project root
 				allow: ['..']
