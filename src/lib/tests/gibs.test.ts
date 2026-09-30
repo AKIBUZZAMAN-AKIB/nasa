@@ -15,7 +15,9 @@ import {
 	gibsTileUrl,
 	gibsUrlParams,
 	gibsWorldviewUrl,
+	isoDayAtNoon,
 	isoDayDiff,
+	isoDayOf,
 	latestAvailableDay,
 	parseGibsAvailability,
 	parseGibsUrl,
@@ -300,14 +302,20 @@ describe('shared links', () => {
 
 	it('keeps defaults out of the URL so a link follows the archive', () => {
 		expect(
-			gibsUrlParams({ enabled: true, layerId: defaultLayerId, day: latest, latest, defaultLayerId })
+			gibsUrlParams({
+				browsing: true,
+				layerId: defaultLayerId,
+				day: latest,
+				latest,
+				defaultLayerId
+			})
 		).toEqual({});
 	});
 
 	it('carries a non-default layer and day', () => {
 		expect(
 			gibsUrlParams({
-				enabled: true,
+				browsing: true,
 				layerId: 'AIRS_L2_Surface_Air_Temperature_Day',
 				day,
 				latest,
@@ -319,10 +327,10 @@ describe('shared links', () => {
 		});
 	});
 
-	it('writes nothing while the imagery is hidden', () => {
+	it('writes nothing while the forecast timeline is on screen', () => {
 		expect(
 			gibsUrlParams({
-				enabled: false,
+				browsing: false,
 				layerId: 'AIRS_L2_Surface_Air_Temperature_Day',
 				day,
 				latest,
@@ -333,7 +341,7 @@ describe('shared links', () => {
 
 	it('round-trips a shared view back to the same selection', () => {
 		const params = gibsUrlParams({
-			enabled: true,
+			browsing: true,
 			layerId: 'AIRS_L2_Surface_Air_Temperature_Day',
 			day,
 			latest,
@@ -344,6 +352,19 @@ describe('shared links', () => {
 			layerId: 'AIRS_L2_Surface_Air_Temperature_Day',
 			day
 		});
+	});
+
+	it('reads the day off the app clock in UTC', () => {
+		expect(isoDayOf(new Date('2024-06-15T23:45:00Z'))).toBe('2024-06-15');
+		expect(isoDayOf(new Date('2024-06-15T00:00:00Z'))).toBe('2024-06-15');
+	});
+
+	it('turns a day back into a clock value that renders as that day', () => {
+		const date = isoDayAtNoon('2013-05-04');
+		expect(date.toISOString()).toBe('2013-05-04T12:00:00.000Z');
+		// The address bar carries the same day, which is what a shared link
+		// restores: `YYYY-MM-DDTHHMM`.
+		expect(isoDayOf(date)).toBe('2013-05-04');
 	});
 
 	it('ignores unknown layers and impossible days instead of failing', () => {

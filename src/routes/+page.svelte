@@ -7,7 +7,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import { activeChart } from '$lib/stores/chart';
-	import { initGibsState } from '$lib/stores/gibs';
+	import { gibsBrowse, initGibsState } from '$lib/stores/gibs';
 	import { map } from '$lib/stores/map';
 	import { initStoredState, loading, url } from '$lib/stores/preferences';
 	import { installRequestCounter } from '$lib/stores/request-counter';
@@ -21,11 +21,9 @@
 		HillshadeButton,
 		SettingsButton
 	} from '$lib/components/buttons';
-	import { GibsButton } from '$lib/components/buttons/gibs-button';
 	import { HistoryButton } from '$lib/components/buttons/history-button';
 	import ClippingPanel from '$lib/components/clipping/clipping-panel.svelte';
 	import Dropzone from '$lib/components/dropzone/dropzone.svelte';
-	import GibsPanel from '$lib/components/gibs/gibs-panel.svelte';
 	import HelpDialog from '$lib/components/help/help-dialog.svelte';
 	import HistoricalPanel from '$lib/components/history/historical-panel.svelte';
 	import KeyboardHandler from '$lib/components/keyboard/keyboard-handler.svelte';
@@ -39,7 +37,7 @@
 	import { getChartPreset } from '$lib/chart-presets';
 	import { postEmbedderReady, startEmbedderBridge, stopEmbedderBridge } from '$lib/embed';
 	import { destroyGibsLayers, initGibsLayers } from '$lib/gibs-layers';
-	import { addOmFileLayers, changeOMfileURL } from '$lib/layers';
+	import { addOmFileLayers, changeOMfileURL, setWeatherLayersSuppressed } from '$lib/layers';
 	import {
 		addTerrainSource,
 		createMap,
@@ -63,6 +61,11 @@
 	// Before any data access: every request to the data API counts against the
 	// daily limit, and the wrapper also reroutes them once it is exhausted.
 	installRequestCounter();
+
+	// The timeline browses the satellite archive for days the forecast files do
+	// not exist for; while it does, the forecast frames are hidden rather than
+	// left on screen under the wrong date.
+	const gibsBrowseSubscription = gibsBrowse.subscribe(setWeatherLayersSuppressed);
 
 	// The single place that keeps the basemap in sync with the RESOLVED theme:
 	// covers the button cycle, an OS light/dark switch while the theme is
@@ -93,7 +96,6 @@
 			$map.addControl(darkModeButton);
 			$map.addControl(new SettingsButton());
 			$map.addControl(new HistoryButton());
-			$map.addControl(new GibsButton());
 			$map.addControl(new HelpButton());
 			$map.addControl(new ClippingButton());
 
@@ -171,6 +173,7 @@
 	});
 
 	onDestroy(() => {
+		gibsBrowseSubscription();
 		destroyGibsLayers();
 		stopEmbedderBridge();
 		unwatchAttributionOverlap();
@@ -196,7 +199,6 @@
 <SelectionPanel />
 <ClippingPanel bind:this={clippingPanel} />
 <HistoricalPanel />
-<GibsPanel />
 <TimeSelector />
 <Settings />
 <HelpDialog />

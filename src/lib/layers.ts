@@ -30,6 +30,27 @@ import { getOmUrlForSource } from './url';
 
 let frameManager: FrameManager | undefined;
 
+/**
+ * While the timeline browses the satellite archive there are no forecast files
+ * for the selected day, so the weather frames are hidden instead of being left
+ * on screen with a date they do not belong to. Every caller of
+ * `changeOMfileURL` goes through this flag, so a domain switch or a chart
+ * change during a browse cannot leak a stale frame back onto the map.
+ */
+let weatherSuppressed = false;
+
+/** Hide (or restore) the forecast frames. Used by the timeline's browse mode. */
+export const setWeatherLayersSuppressed = (suppressed: boolean): void => {
+	if (suppressed === weatherSuppressed) return;
+	weatherSuppressed = suppressed;
+	// Entering: clear the frames now, so no stale day stays on screen.
+	// Leaving: nothing to do — the caller is moving the clock back into the
+	// forecast window, and its own `changeOMfileURL()` rebuilds the frames
+	// against the day it lands on. Rebuilding here would request the old day's
+	// file, which is exactly the file that does not exist.
+	if (suppressed) changeOMfileURL();
+};
+
 const getRasterOpacity = (): number => {
 	const opacityValue = get(opacity) / 100;
 	return mode.current === 'dark' ? Math.max(0, (opacityValue * 100 - 10) / 100) : opacityValue;
@@ -131,6 +152,14 @@ export const reanchorRasterLayers = (): void => {
 export const changeOMfileURL = (): void => {
 	const map = get(m);
 	if (!map || !frameManager) return;
+
+	// Browsing satellite history: the forecast has nothing for this day, so the
+	// frames are cleared (an empty frame fades the previous one out) rather than
+	// drawn against the wrong date.
+	if (weatherSuppressed) {
+		frameManager.show([]);
+		return;
+	}
 
 	// `undefined` means a source is not ready yet; an empty list means the chart
 	// deliberately draws nothing, which the frame manager commits as a blank

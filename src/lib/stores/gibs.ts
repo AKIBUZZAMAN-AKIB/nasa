@@ -1,11 +1,18 @@
 /**
- * State for the NASA GIBS satellite history layer.
+ * State for the NASA GIBS satellite history the timeline browses past the end
+ * of the forecast archive.
+ *
+ * The forecast side of the app serves roughly seven days of history; older
+ * days simply have no `.om` files. Instead of clamping those dates to a week
+ * ago — which put a wrong day on the clock and nothing on the map — the bottom
+ * timeline switches into a browse mode over the GIBS archive: the same control,
+ * but the day it shows is the day the imagery really is.
  *
  * Holds the selection (which layer, which day, how opaque), the availability
- * window fetched per layer from GIBS, and the actions the panel and the map
- * wiring share. Date resolution — snapping to a layer's cadence and clamping
- * to the days that really exist — happens here, so both the map and the UI
- * always agree on what is on screen.
+ * window fetched per layer, and the actions the timeline shares with the map
+ * wiring. Date resolution — snapping to a layer's cadence and clamping to the
+ * days that really exist — happens here, so the clock, the URL and the map can
+ * never disagree.
  */
 import { get, writable } from 'svelte/store';
 
@@ -23,28 +30,30 @@ import {
 	gibsAvailabilityUrl,
 	gibsLayerById,
 	gibsUrlParams,
+	isoDayAtNoon,
 	latestAvailableDay,
 	parseGibsAvailability,
 	parseGibsUrl,
 	resolveAvailableDay,
 	shiftIsoDay
 } from '$lib/gibs';
+import { formatISOWithoutTimezone } from '$lib/time-format';
+
+import { updateUrl } from '../url';
+import { time } from './time';
 
 /** Layer shown when the user has not picked another one. */
 export const DEFAULT_GIBS_LAYER = 'MODIS_Terra_CorrectedReflectance_TrueColor';
 
-/** Whether the satellite history panel is open. */
-export const gibsPanelOpen = writable(false);
+/**
+ * Browsing the satellite archive instead of the forecast. Entered by walking
+ * the timeline further back than the forecast goes (or by opening a link that
+ * asks for such a day), left again with the timeline's Forecast button.
+ */
+export const gibsBrowse = writable(false);
 
 /** Selected layer; persisted so a reload returns to the same imagery. */
 export const gibsLayerId = persisted<string>('gibs-layer', DEFAULT_GIBS_LAYER);
-
-/**
- * Draw the imagery on the map at all (keeps the selection when off). Off by
- * default so the weather map looks unchanged until the user opts in from the
- * panel — the button opens the panel, ticking the box shows the imagery.
- */
-export const gibsEnabled = persisted<boolean>('gibs-enabled', false);
 
 /** Raster opacity in percent. */
 export const gibsOpacity = persisted<number>('gibs-opacity', 85);
@@ -113,6 +122,10 @@ const writeCachedAvailability = (layerId: string, ranges: GibsAvailabilityRange[
 /** Today in UTC, the upper bound of the availability window. */
 const todayIso = (): string => new Date().toISOString().slice(0, 10);
 
+/** A real `YYYY-MM-DD` day, rejecting shapes that merely look like one. */
+const isDay = (value: string | undefined): value is string =>
+	!!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && shiftIsoDay(value, 0) === value;
+
 /**
  * Fetch the available dates of a layer, from its first day of coverage to
  * today. GIBS answers with compact ranges (a full 26-year daily layer is a few
@@ -127,7 +140,7 @@ export const loadGibsAvailability = async (
 	const pending = inflight.get(layer.id);
 	if (pending) return pending;
 
-	// A copy cached earlier today keeps the panel instant on a reload; the
+	// A copy cached earlier today keeps the timeline instant on a reload; the
 	// request below then only runs when storage is empty, stale or blocked.
 	const stored = readCachedAvailability(layer.id);
 	if (stored) {
@@ -155,18 +168,18 @@ export const loadGibsAvailability = async (
 
 /**
  * Mirror the selection into the address bar with `replaceState` — the same
- * approach the rest of the app uses — so a satellite view can be shared
- * without filling the back button with dates.
+ * approach the rest of the app uses — so a satellite day can be shared without
+ * filling the back button with dates.
  *
  * Defaults are omitted: the layer stays out of the URL while the default one is
  * shown, and so does the day while the newest day is shown, which keeps a shared
- * link following the archive instead of freezing on today's date.
+ * link following the archive instead of freezing on the day it was copied.
  */
 const syncGibsUrl = (): void => {
 	if (!browser) return;
 	const url = new URL(window.location.href);
 	const params = gibsUrlParams({
-		enabled: get(gibsEnabled),
+		browsing: get(gibsBrowse),
 		layerId: get(gibsLayerId),
 		day: get(gibsResolvedDate),
 		latest: get(gibsLatestDate),
@@ -184,14 +197,29 @@ const syncGibsUrl = (): void => {
 	if (next !== current) window.history.replaceState(window.history.state, '', next);
 };
 
-/** Read a shared link: `?gibs=<layer>&gibs-date=<day>` restores the view. */
+/**
+ * Point the app's clock at the day the imagery really is. The clock drives the
+ * address bar and every local-time label, so writing the resolved day here is
+ * what makes the timeline show the truth rather than the day that was asked
+ * for.
+ */
+const syncClock = (): void => {
+	const day = get(gibsResolvedDate);
+	if (!get(gibsBrowse) || !day) return;
+	const at = isoDayAtNoon(day);
+	time.set(at);
+	void updateUrl('time', formatISOWithoutTimezone(at));
+};
+
+/** Read a shared link: `?gibs=<layer>&gibs-date=<day>` restores the day. */
 const applyGibsUrlParams = (): void => {
 	if (!browser) return;
 	const { layerId, day } = parseGibsUrl(window.location.search);
 	if (layerId) gibsLayerId.set(layerId);
-	if (day) gibsRequestedDate.set(day);
-	// Either parameter means the sender had the imagery on screen.
-	if (layerId || day) gibsEnabled.set(true);
+	if (day) {
+		gibsRequestedDate.set(day);
+		gibsBrowse.set(true);
+	}
 };
 
 /** Recompute the drawn day from the requested day and the known availability. */
@@ -211,6 +239,7 @@ const resolve = (announce: boolean): void => {
 		toast.info(`No imagery on ${requested} — showing ${resolved}`, { id: 'gibs-date' });
 	}
 
+	syncClock();
 	syncGibsUrl();
 };
 
@@ -239,7 +268,34 @@ export const activateGibsLayer = async (layerId?: string, announce = false): Pro
 	}
 };
 
-/** Jump to a specific day (the panel's date input and slider). */
+/**
+ * Walk the timeline into the satellite archive: the forecast has nothing for
+ * this day, so the imagery takes over and the clock follows the day that is
+ * actually on screen.
+ */
+export const enterGibsBrowse = async (requestedDay?: string): Promise<void> => {
+	if (!browser) return;
+	const fromForecast = !get(gibsBrowse);
+	gibsBrowse.set(true);
+	if (isDay(requestedDay)) gibsRequestedDate.set(requestedDay);
+
+	if (fromForecast) {
+		toast.info('Past the end of the forecast archive — showing NASA satellite imagery.', {
+			id: 'gibs-browse'
+		});
+	}
+
+	if (get(gibsAvailability).status !== 'ready') await activateGibsLayer();
+	else resolve(true);
+};
+
+/** Hand the timeline back to the forecast. The imagery hides, the day stays. */
+export const exitGibsBrowse = (): void => {
+	gibsBrowse.set(false);
+	syncGibsUrl();
+};
+
+/** Jump to a specific day (the timeline's date input and slider). */
 export const setGibsDate = (day: string, announce = true): void => {
 	gibsRequestedDate.set(day);
 	if (get(gibsAvailability).status !== 'ready') {
@@ -266,28 +322,15 @@ export const goToLatestGibs = async (): Promise<void> => {
 	if (latest) setGibsDate(latest, false);
 };
 
-/** Turn the imagery on or off (the panel's checkbox and shared links). */
-export const setGibsEnabled = (enabled: boolean): void => {
-	gibsEnabled.set(enabled);
-	syncGibsUrl();
-};
-
 /** Switch to another catalogue entry, keeping the requested day. */
 export const selectGibsLayer = (layerId: string): void => {
 	void activateGibsLayer(layerId, true);
 	syncGibsUrl();
 };
 
-/** Toggle the panel (the tool button and the panel header both use this). */
-export const toggleGibsPanel = (): void => {
-	const open = !get(gibsPanelOpen);
-	gibsPanelOpen.set(open);
-	if (open && get(gibsAvailability).status === 'idle') void activateGibsLayer();
-};
-
 /**
- * Load availability once on startup. Runs even while the imagery is hidden so
- * the panel opens on a ready date instead of "checking…".
+ * Load availability once on startup and restore a shared satellite link, so
+ * the timeline can open straight on the day the link asked for.
  */
 export const initGibsState = (): void => {
 	if (!browser) return;

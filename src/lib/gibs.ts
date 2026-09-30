@@ -693,6 +693,19 @@ export const formatGibsDay = (day: string, locale = 'en-GB'): string =>
 		timeZone: 'UTC'
 	}).format(new Date(`${day}T00:00:00Z`));
 
+/**
+ * `2024-06-15T13:45:00Z` → `2024-06-15`: the day the app's clock points at, in
+ * UTC, which is the axis GIBS publishes on.
+ */
+export const isoDayOf = (date: Date): string => date.toISOString().slice(0, 10);
+
+/**
+ * `2024-06-15` → noon UTC that day. The app renders the clock in local time, so
+ * landing in the middle of the UTC day keeps the local date the same one the
+ * imagery shows for every offset the app is realistically used in.
+ */
+export const isoDayAtNoon = (day: string): Date => new Date(`${day}T12:00:00Z`);
+
 /** Address-bar keys for a shared satellite view. */
 export const GIBS_URL_LAYER_PARAM = 'gibs';
 export const GIBS_URL_DATE_PARAM = 'gibs-date';
@@ -704,13 +717,13 @@ export const GIBS_URL_DATE_PARAM = 'gibs-date';
  * the day it was copied.
  */
 export const gibsUrlParams = (state: {
-	enabled: boolean;
+	browsing: boolean;
 	layerId: string;
 	day?: string;
 	latest?: string;
 	defaultLayerId: string;
 }): Record<string, string> => {
-	if (!state.enabled) return {};
+	if (!state.browsing) return {};
 	const params: Record<string, string> = {};
 	if (state.layerId !== state.defaultLayerId) params[GIBS_URL_LAYER_PARAM] = state.layerId;
 	if (state.day && state.day !== state.latest) params[GIBS_URL_DATE_PARAM] = state.day;

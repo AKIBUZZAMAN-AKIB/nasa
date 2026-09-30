@@ -3,16 +3,24 @@
 	import { SvelteDate } from 'svelte/reactivity';
 	import { fade } from 'svelte/transition';
 
-	import { closestModelRun, domainStep } from '@openmeteo/weather-map-layer';
+	import { closestModelRun } from '@openmeteo/weather-map-layer';
 	import { mode } from 'mode-watcher';
 	import { toast } from 'svelte-sonner';
 
+	import {
+		enterGibsBrowse,
+		exitGibsBrowse,
+		gibsBrowse,
+		goToLatestGibs,
+		shiftGibsDate
+	} from '$lib/stores/gibs';
 	import { timeSelectorActions } from '$lib/stores/keyboard';
 	import { desktop, loading } from '$lib/stores/preferences';
 	import { metaJson, modelRunLocked } from '$lib/stores/time';
 	import { inProgress, latest, modelRun, now, time } from '$lib/stores/time';
 	import { selectedDomain } from '$lib/stores/variables';
 
+	import SatelliteBar from '$lib/components/gibs/satellite-bar.svelte';
 	import PrefetchButton from '$lib/components/time/prefetch-button.svelte';
 	import * as Select from '$lib/components/ui/select';
 
@@ -22,6 +30,7 @@
 		MILLISECONDS_PER_HOUR,
 		MILLISECONDS_PER_WEEK
 	} from '$lib/constants';
+	import { isoDayOf } from '$lib/gibs';
 	import { throttle } from '$lib/helpers';
 	import { changeOMfileURL } from '$lib/layers';
 	import { tryGetMetaData } from '$lib/metadata';
@@ -40,8 +49,9 @@
 	import { findTimeStep } from '$lib/time-utils';
 	import { updateUrl } from '$lib/url';
 
-	// Disables time selection when loading new OM files
-	let disabled = $derived($modelRun === undefined);
+	// Disables time selection when loading new OM files. Satellite browsing has
+	// no model run to wait for, so the control stays live there.
+	let disabled = $derived($modelRun === undefined && !$gibsBrowse);
 	// Tracks the currently selected date for display and navigation
 	let currentDate = $state(new Date($time));
 
@@ -170,6 +180,14 @@
 	const previousDay = () => {
 		let date = new SvelteDate($time);
 		date.setUTCHours(date.getUTCHours() - 24);
+		// Older than the seven days the forecast keeps: that day is a satellite
+		// day, not a dead end, so hand it to the browse mode instead of snapping
+		// back. Days that only an earlier model run serves stay in the forecast —
+		// `checkClosestModelRun` switches runs for those.
+		if (date.getTime() < Date.now() - MILLISECONDS_PER_WEEK) {
+			void enterGibsBrowse(isoDayOf(date));
+			return;
+		}
 		const timeStep = findTimeStep(date, timeSteps);
 		if (timeStep) date = new SvelteDate(timeStep);
 		onDateChange(date);
@@ -203,20 +221,15 @@
 			nearestModelRun = latestReferenceTime;
 		}
 
-		// other than seasonal models, data is not available longer than 7 days
+		// Other than seasonal models, the forecast files are only kept for seven
+		// days. Older than that the timeline does not clamp — it keeps walking,
+		// onto the satellite archive, with the clock set to the day that imagery
+		// really is (see the stores/gibs browse mode).
 		if ($selectedDomain.model_interval !== 'monthly') {
-			// check that requested timeStep is not older than 7 days
 			const date7DaysAgo = Date.now() - MILLISECONDS_PER_WEEK;
 			if (timeStep.getTime() < date7DaysAgo) {
-				toast.warning('Date selected too old, using 7 days ago time');
-				const nowTimeStep = domainStep(
-					new Date(date7DaysAgo),
-					$selectedDomain.time_interval,
-					'floor'
-				);
-				time.set(nowTimeStep);
-				timeStep = nowTimeStep;
-				updateUrl('time', formatISOWithoutTimezone(nowTimeStep));
+				await enterGibsBrowse(isoDayOf(timeStep));
+				return;
 			}
 		}
 
@@ -372,25 +385,58 @@
 		}
 	};
 
+	// The same chevrons and keys work in both modes: in the forecast they move
+	// by hours, in the satellite archive by whole days (or the layer's own
+	// cadence, for a 16-day or monthly composite).
+	const stepBack = () => {
+		if ($gibsBrowse) shiftGibsDate(-1);
+		else previousHour();
+	};
+
+	const stepForward = () => {
+		if ($gibsBrowse) shiftGibsDate(1);
+		else nextHour();
+	};
+
+	const dayBack = () => {
+		if ($gibsBrowse) shiftGibsDate(-1);
+		else previousDay();
+	};
+
+	const dayForward = () => {
+		if ($gibsBrowse) shiftGibsDate(1);
+		else nextDay();
+	};
+
+	const latestStep = () => {
+		if ($gibsBrowse) void goToLatestGibs();
+		else setLatestModelRun();
+	};
+
+	const backToNow = () => {
+		if ($gibsBrowse) exitGibsBrowse();
+		jumpToCurrentTime();
+	};
+
 	// throttled versions of the navigation functions
-	const throttledPreviousHour = throttle(previousHour, 150);
-	const throttledNextHour = throttle(nextHour, 150);
-	const throttledPreviousDay = throttle(previousDay, 150);
-	const throttledNextDay = throttle(nextDay, 150);
+	const throttledStepBack = throttle(stepBack, 150);
+	const throttledStepForward = throttle(stepForward, 150);
+	const throttledDayBack = throttle(dayBack, 150);
+	const throttledDayForward = throttle(dayForward, 150);
 	const throttledPreviousModel = throttle(previousModel, 250);
 	const throttledNextModel = throttle(nextModel, 250);
 
 	$effect(() => {
 		timeSelectorActions.set({
-			previousHour: throttledPreviousHour,
-			nextHour: throttledNextHour,
-			previousDay: throttledPreviousDay,
-			nextDay: throttledNextDay,
+			previousHour: throttledStepBack,
+			nextHour: throttledStepForward,
+			previousDay: throttledDayBack,
+			nextDay: throttledDayForward,
 			previousModel: throttledPreviousModel,
 			nextModel: throttledNextModel,
-			jumpToCurrentTime,
+			jumpToCurrentTime: backToNow,
 			toggleModelRunLock,
-			setLatestModelRun,
+			setLatestModelRun: latestStep,
 			timeNavigationDisabled: disabled
 		});
 		return () => timeSelectorActions.set({});
@@ -802,7 +848,7 @@
 		<div
 			bind:this={hoursHoverContainer}
 			bind:clientWidth={hoursHoverContainerWidth}
-			class="absolute {!desktop.current
+			class="absolute {$gibsBrowse ? 'hidden' : ''} {!desktop.current
 				? 'pointer-events-none'
 				: ''} bottom-5 w-full h-8.5 z-20 cursor-pointer duration-500"
 		>
@@ -874,7 +920,9 @@
 		</div>
 		<!-- Model Run Selection Dropdown -->
 		<div
-			class="-top-4.5 h-4.5 z-10 right-0 absolute flex rounded-t-lg items-center px-2 gap-0.5 bg-glass/65 backdrop-blur-sm"
+			class="{$gibsBrowse
+				? 'hidden'
+				: ''} -top-4.5 h-4.5 z-10 right-0 absolute flex rounded-t-lg items-center px-2 gap-0.5 bg-glass/65 backdrop-blur-sm"
 		>
 			<PrefetchButton />
 
@@ -1001,8 +1049,9 @@
 				class="flex items-center {desktop.current ? 'h-12.5  ' : 'top-3.5 w-12 h-full'} {disabled
 					? 'cursor-not-allowed'
 					: 'cursor-pointer'} "
-				onclick={previousHour}
-				aria-label="Previous Hour"
+				onclick={stepBack}
+				aria-label={$gibsBrowse ? 'Previous day' : 'Previous Hour'}
+				title={$gibsBrowse ? 'Earlier satellite day' : 'Previous hour'}
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
@@ -1033,8 +1082,9 @@
 				class="flex items-center justify-end w-7 {desktop.current
 					? '-right-7 h-12.5'
 					: 'right-0 w-12 h-full'} {disabled ? 'cursor-not-allowed' : 'cursor-pointer'} "
-				onclick={nextHour}
-				aria-label="Next Hour"
+				onclick={stepForward}
+				aria-label={$gibsBrowse ? 'Next day' : 'Next Hour'}
+				title={$gibsBrowse ? 'Later satellite day' : 'Next hour'}
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
@@ -1052,7 +1102,9 @@
 			</button>
 		</div>
 		<div
-			class="time-selector md:px-0 h-20 md:h-12.5 relative bg-glass/75 backdrop-blur-sm duration-500"
+			class="{$gibsBrowse
+				? 'hidden'
+				: ''} time-selector md:px-0 h-20 md:h-12.5 relative bg-glass/75 backdrop-blur-sm duration-500"
 		>
 			{#if hoverX || currentDate.getTime() !== $time.getTime()}
 				<div
@@ -1173,5 +1225,10 @@
 				{/if}
 			</div>
 		</div>
+		{#if $gibsBrowse}
+			<div class="relative bg-glass/75 backdrop-blur-sm duration-500">
+				<SatelliteBar onBackToForecast={jumpToCurrentTime} />
+			</div>
+		{/if}
 	</div>
 </div>

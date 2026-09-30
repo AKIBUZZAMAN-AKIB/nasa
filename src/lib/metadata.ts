@@ -10,6 +10,7 @@ import {
 	setPlainVariable,
 	setSources
 } from '$lib/stores/chart';
+import { enterGibsBrowse, gibsBrowse } from '$lib/stores/gibs';
 import { loading } from '$lib/stores/preferences';
 import {
 	inProgress as iP,
@@ -25,6 +26,8 @@ import {
 	isStandaloneVariable
 } from '$lib/components/selection/selection-utils';
 
+import { MILLISECONDS_PER_WEEK } from './constants';
+import { isoDayOf } from './gibs';
 import { BASE_URI, fmtModelRun } from './helpers';
 import { formatISOWithoutTimezone } from './time-format';
 import { findTimeStep } from './time-utils';
@@ -150,7 +153,34 @@ export const loadDomainMetaData = async (newDomain: string) => {
 	mJ.set(meta);
 
 	const timeSteps = meta.valid_times.map((validTime: string) => new Date(validTime));
-	const timeStep = findTimeStep(get(t), timeSteps) ?? timeSteps[0];
+
+	// Already browsing satellite history: the forecast time must not overwrite
+	// the day that is on screen.
+	if (get(gibsBrowse)) {
+		matchChartOrFallback();
+		return;
+	}
+
+	// A day older than the forecast archive is a satellite-day request (a shared
+	// link, a step off the left edge of the timeline) rather than a typo: hand it
+	// to the browse mode instead of silently snapping it to the oldest step.
+	//
+	// What "older" means depends on the domain: hourly and daily models keep
+	// seven days of files, while the seasonal ones carry months, so for those the
+	// window itself is the boundary. A day inside the window always stays in the
+	// forecast — an earlier model run may well serve it.
+	const requestedTime = get(t);
+	const oldestForecastStep =
+		get(selectedDomain).model_interval === 'monthly'
+			? timeSteps[0].getTime()
+			: Date.now() - MILLISECONDS_PER_WEEK;
+	if (requestedTime.getTime() < oldestForecastStep) {
+		void enterGibsBrowse(isoDayOf(requestedTime));
+		matchChartOrFallback();
+		return;
+	}
+
+	const timeStep = findTimeStep(requestedTime, timeSteps) ?? timeSteps[0];
 	t.set(timeStep);
 	updateUrl('time', formatISOWithoutTimezone(timeStep));
 

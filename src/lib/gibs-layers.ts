@@ -15,7 +15,7 @@ import { type Unsubscriber, get } from 'svelte/store';
 
 import { toast } from 'svelte-sonner';
 
-import { gibsEnabled, gibsLayerId, gibsOpacity, gibsResolvedDate } from '$lib/stores/gibs';
+import { gibsBrowse, gibsLayerId, gibsOpacity, gibsResolvedDate } from '$lib/stores/gibs';
 import { map as mapStore } from '$lib/stores/map';
 import { preferences } from '$lib/stores/preferences';
 
@@ -67,9 +67,9 @@ const syncGibs = (): void => {
 	if (!map || !map.isStyleLoaded()) return;
 	const layer = gibsLayerById(get(gibsLayerId));
 	const day = get(gibsResolvedDate);
-	const enabled = get(gibsEnabled);
+	const browsing = get(gibsBrowse);
 
-	if (!enabled || !layer || !day) {
+	if (!browsing || !layer || !day) {
 		removeGibs();
 		return;
 	}
@@ -152,7 +152,7 @@ export const initGibsLayers = (): void => {
 		gibsLayerId.subscribe(syncGibs),
 		gibsResolvedDate.subscribe(syncGibs),
 		gibsOpacity.subscribe(syncGibs),
-		gibsEnabled.subscribe(syncGibs),
+		gibsBrowse.subscribe(syncGibs),
 		preferences.subscribe((value) => {
 			if (value.hillshade === hillshadeOn) return;
 			hillshadeOn = value.hillshade;
