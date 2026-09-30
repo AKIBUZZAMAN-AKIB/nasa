@@ -55,8 +55,10 @@
 	let track: HTMLElement | undefined = $state();
 	let width = $state(0);
 	/** null → not dragging; otherwise what the drag is moving. */
-	let drag: 'from' | 'to' | 'band' | undefined = $state();
+	let drag: 'from' | 'to' | 'band' | 'seek' | undefined = $state();
 	let dragOffset = 0;
+	/** Interval width captured when a band drag starts, so it cannot drift. */
+	let bandWidth = 0;
 
 	const fractionAt = (clientX: number): number => {
 		if (!track || !width) return 0;
@@ -64,23 +66,33 @@
 		return (clientX - rect.left) / rect.width;
 	};
 
-	const startDrag = (event: PointerEvent, what: 'from' | 'to' | 'band'): void => {
+	const startDrag = (event: PointerEvent, what: 'from' | 'to' | 'band' | 'seek'): void => {
 		event.preventDefault();
-		// The band sits inside the track, whose click-to-seek must not fire too.
+		// The band sits inside the track, whose own pointerdown must not also fire.
 		event.stopPropagation();
 		(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
 		drag = what;
-		dragOffset = what === 'band' ? fractionAt(event.clientX) - fromPosition : 0;
+		if (what === 'band') {
+			dragOffset = fractionAt(event.clientX) - fromPosition;
+			bandWidth = toPosition - fromPosition;
+		}
 	};
 
 	const onPointerMove = (event: PointerEvent): void => {
-		if (!drag || !onchange) return;
+		if (!drag) return;
 		const fraction = fractionAt(event.clientX);
+
+		// Dragging the bare rail scrubs the shown day, the way the slider used to.
+		if (drag === 'seek') {
+			onseek?.(dayAt(fraction));
+			return;
+		}
+		if (!onchange) return;
+
 		if (drag === 'band') {
 			// Move both edges together, keeping the width and the archive bounds.
-			const width = toPosition - fromPosition;
-			const start = Math.min(1 - width, Math.max(0, fraction - dragOffset));
-			onchange(dayAt(start), dayAt(start + width));
+			const start = Math.min(1 - bandWidth, Math.max(0, fraction - dragOffset));
+			onchange(dayAt(start), dayAt(start + bandWidth));
 			return;
 		}
 		const day = dayAt(fraction);
@@ -93,8 +105,10 @@
 	};
 
 	const onRailPointerDown = (event: PointerEvent): void => {
-		// The handles and band stop propagation themselves; reaching here means the
-		// click was outside the band, which moves the shown day.
+		// The handles and the band stop propagation themselves; reaching here means
+		// the press landed outside the interval, which moves the shown day — and
+		// keeps moving it while the pointer stays down.
+		startDrag(event, 'seek');
 		onseek?.(dayAt(fractionAt(event.clientX)));
 	};
 
