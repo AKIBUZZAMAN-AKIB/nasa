@@ -19,7 +19,11 @@ import { toast } from 'svelte-sonner';
 
 import { browser } from '$app/environment';
 
+import { activeChart, pickPrimaryVariable } from '$lib/stores/chart';
+import { loading } from '$lib/stores/preferences';
+
 import { gibsLayerById, isoDayOf, latestAvailableDay } from '$lib/gibs';
+import { type PrefetchProgress, prefetchData } from '$lib/prefetch';
 import {
 	REPLAY_URL_FROM,
 	REPLAY_URL_STEP,
@@ -36,11 +40,12 @@ import {
 	replayUrlParams,
 	satelliteFrames,
 	stepLabel,
-	stepsForLayer
+	stepsForLayer,
+	warmupRange
 } from '$lib/replay';
 import { formatISOWithoutTimezone, parseISOWithoutTimezone } from '$lib/time-format';
 
-import { preloadGibsDay } from '../gibs-layers';
+import { gibsImagery, preloadGibsDay } from '../gibs-layers';
 import { changeOMfileURL } from '../layers';
 import { updateUrl } from '../url';
 import {
@@ -52,7 +57,8 @@ import {
 	gibsResolvedDate,
 	setGibsDate
 } from './gibs';
-import { metaJson, time } from './time';
+import { metaJson, modelRun, time } from './time';
+import { selectedDomain } from './variables';
 
 /** Whether the replay controls are open on the timeline. */
 export const replayOpen = writable(false);
@@ -191,6 +197,50 @@ const applyReplayFrame = async (index: number): Promise<void> => {
 	changeOMfileURL();
 };
 
+/**
+ * Resolve when the frame that was just asked for is actually on screen.
+ *
+ * A replay that ticks on a fixed clock regardless of the network plays a lie:
+ * frames get skipped, or the same one is shown twice, while the label says the
+ * range ran. So the clock waits for the map (the satellite cross-fade, or the
+ * forecast frame manager) and only then measures the rest of the interval — a
+ * slow connection makes playback slower, never wrong.
+ */
+const waitForFrameShown = (timeoutMs = 6000): Promise<'ready' | 'slow' | 'timeout'> => {
+	const settled = (): 'ready' | 'slow' | 'timeout' | undefined => {
+		if (get(replayMode) === 'forecast') return get(loading) ? undefined : 'ready';
+		const status = get(gibsImagery).status;
+		if (status === 'loading' || status === 'idle') return undefined;
+		return status === 'slow' ? 'slow' : 'ready';
+	};
+
+	const immediate = settled();
+	if (immediate) return Promise.resolve(immediate);
+
+	return new Promise((resolve) => {
+		let unsubscribe = () => {};
+		const timer = setTimeout(() => {
+			unsubscribe();
+			resolve('timeout');
+		}, timeoutMs);
+
+		const check = () => {
+			const state = settled();
+			if (!state) return;
+			clearTimeout(timer);
+			unsubscribe();
+			resolve(state);
+		};
+
+		if (get(replayMode) === 'forecast') {
+			unsubscribe = loading.subscribe(check);
+		} else {
+			unsubscribe = gibsImagery.subscribe(check);
+		}
+		check();
+	});
+};
+
 /** One tick of the playback clock; chains itself while playing. */
 const advance = async (): Promise<void> => {
 	if (!get(replayPlaying)) return;
@@ -203,10 +253,15 @@ const advance = async (): Promise<void> => {
 		next = 0;
 	}
 
+	const startedAt = Date.now();
 	await applyReplayFrame(next);
-	if (get(replayPlaying)) {
-		timer = setTimeout(() => void advance(), replayIntervalMs(get(replaySpeed)));
-	}
+	await waitForFrameShown();
+	if (!get(replayPlaying)) return;
+
+	// The interval counts from the start of the frame: a frame that took longer
+	// than the interval moves on at once, so playback never lags behind silently.
+	const remaining = replayIntervalMs(get(replaySpeed)) - (Date.now() - startedAt);
+	timer = setTimeout(() => void advance(), Math.max(0, remaining));
 };
 
 const schedule = (): void => {
@@ -305,6 +360,88 @@ export const toggleReplayOpen = (): void => {
 	syncReplayUrl();
 };
 
+export interface WarmUpState {
+	status: 'idle' | 'running' | 'done' | 'aborted' | 'error';
+	current: number;
+	total: number;
+	/** Files that came back whole; the rest are still fetched as the replay runs. */
+	loaded: number;
+}
+
+/** Progress of a forecast warm-up (the replay itself never needs one). */
+export const replayWarmUp = writable<WarmUpState>({
+	status: 'idle',
+	current: 0,
+	total: 0,
+	loaded: 0
+});
+
+let warmUpController: AbortController | undefined;
+
+/**
+ * Pull the forecast files for the selected range into the app's own cache
+ * before a replay.
+ *
+ * This is deliberately a button and not an automatic step: every file is a
+ * request against the data API's daily allowance, and a 7-day hourly replay is
+ * 168 of them. The imagery side needs none of this — GIBS tiles come straight
+ * from the map's own tile requests.
+ */
+export const warmUpReplay = async (): Promise<void> => {
+	if (get(replayWarmUp).status === 'running') return;
+	const frames = get(replayFrames);
+	const range = warmupRange(frames);
+	const meta = get(metaJson);
+	const run = get(modelRun);
+	if (!range || !meta || !run) {
+		toast.info('Load a forecast run first — then the range can be warmed up.', {
+			id: 'replay-warmup'
+		});
+		return;
+	}
+
+	warmUpController = new AbortController();
+	replayWarmUp.set({ status: 'running', current: 0, total: frames.length, loaded: 0 });
+
+	const result = await prefetchData(
+		{
+			startDate: range.start,
+			endDate: range.end,
+			metaJson: meta,
+			modelRun: run,
+			domain: get(selectedDomain).value,
+			variable: pickPrimaryVariable(get(activeChart)),
+			signal: warmUpController.signal
+		},
+		(progress: PrefetchProgress) =>
+			replayWarmUp.update((state) => ({
+				...state,
+				current: progress.current,
+				total: progress.total
+			}))
+	);
+
+	replayWarmUp.update((state) => ({
+		...state,
+		status: result.aborted ? 'aborted' : result.success ? 'done' : 'error',
+		loaded: result.successCount,
+		total: result.totalCount
+	}));
+	warmUpController = undefined;
+
+	if (result.aborted) return;
+	if (result.successCount === 0) {
+		toast.warning('Nothing could be warmed up — the replay will fetch each frame as it goes.', {
+			id: 'replay-warmup'
+		});
+	}
+};
+
+export const cancelWarmUp = (): void => {
+	warmUpController?.abort();
+	warmUpController = undefined;
+};
+
 /** Summary line for the bar: frames and how long the pass takes. */
 export const replaySummary = derived(
 	[replayFrames, replaySpeed, replayStep],
@@ -333,6 +470,17 @@ export const initReplayState = (): void => {
 		replayMode.set(modeForRange(from, get(metaJson)));
 		refreshReplayFrames();
 	}
+
+	// Keep one frame ahead warm: when a frame lands, the slot that just went
+	// clear is free, so the next day can be fetched while this one is watched.
+	gibsImagery.subscribe((state) => {
+		if (state.status !== 'ready') return;
+		if (!get(replayPlaying) || get(replayMode) !== 'satellite') return;
+		const frames = get(replayFrames);
+		if (frames.length < 2) return;
+		const next = frames[get(replayIndex) + 1] ?? (get(replayLoop) ? frames[0] : undefined);
+		preloadGibsDay(next);
+	});
 
 	gibsAvailability.subscribe(() => {
 		if (get(replayOpen)) refreshReplayFrames();

@@ -218,9 +218,10 @@
 					Buffering…
 				</span>
 			{/if}
-			<span class="ml-auto hidden opacity-60 md:inline"
-				>Space = play/pause · , and . = one frame</span
-			>
+			<span class="ml-auto hidden opacity-60 lg:inline">
+				Playing waits for each frame, so a slow line plays slower — never out of step · Space =
+				play/pause · , and . = one frame
+			</span>
 		</div>
 	</div>
 {/if}

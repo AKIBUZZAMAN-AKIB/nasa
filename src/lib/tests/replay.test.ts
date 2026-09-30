@@ -17,7 +17,8 @@ import {
 	replayUrlParams,
 	satelliteFrames,
 	stepLabel,
-	stepsForLayer
+	stepsForLayer,
+	warmupRange
 } from '$lib/replay';
 
 const range = (start: string, end: string, step = 'P1D'): GibsAvailabilityRange => ({
@@ -283,5 +284,23 @@ describe('catalogue coverage', () => {
 			expect(steps.length).toBeGreaterThan(0);
 			for (const step of steps) expect(replayStepDef(step).days).toBeGreaterThan(0);
 		}
+	});
+});
+
+describe('warmupRange', () => {
+	it('spans the whole first and last day of the frames', () => {
+		const range = warmupRange(['2024-05-01T0600', '2024-05-02T1200', '2024-05-03T1800'])!;
+		expect(range.start.toISOString()).toBe('2024-05-01T00:00:00.000Z');
+		expect(range.end.toISOString()).toBe('2024-05-03T23:59:59.000Z');
+	});
+
+	it('works for day-only satellite frames too', () => {
+		const range = warmupRange(['2024-05-01', '2024-05-01'])!;
+		expect(range.start.toISOString()).toBe('2024-05-01T00:00:00.000Z');
+		expect(range.end.toISOString()).toBe('2024-05-01T23:59:59.000Z');
+	});
+
+	it('returns nothing when there is nothing to warm up', () => {
+		expect(warmupRange([])).toBeUndefined();
 	});
 });

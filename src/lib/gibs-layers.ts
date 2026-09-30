@@ -60,11 +60,25 @@ interface Slot {
 	forLayerId?: string;
 	awaitingRender: boolean;
 	errored: boolean;
+	/** The pump is filling this slot right now; a preload must leave it alone. */
+	busy: boolean;
 }
 
 const slots: [Slot, Slot] = [
-	{ sourceId: SOURCE_IDS[0], layerId: LAYER_IDS[0], awaitingRender: false, errored: false },
-	{ sourceId: SOURCE_IDS[1], layerId: LAYER_IDS[1], awaitingRender: false, errored: false }
+	{
+		sourceId: SOURCE_IDS[0],
+		layerId: LAYER_IDS[0],
+		awaitingRender: false,
+		errored: false,
+		busy: false
+	},
+	{
+		sourceId: SOURCE_IDS[1],
+		layerId: LAYER_IDS[1],
+		awaitingRender: false,
+		errored: false,
+		busy: false
+	}
 ];
 
 let map: maplibregl.Map | undefined;
@@ -110,6 +124,7 @@ const removeSlot = (slot: Slot): void => {
 	slot.forLayerId = undefined;
 	slot.awaitingRender = false;
 	slot.errored = false;
+	slot.busy = false;
 };
 
 const removeAll = (): void => {
@@ -231,6 +246,7 @@ const swap = (slot: Slot): void => {
 
 	const previous = from;
 	visibleIndex = visibleIndex === 0 ? 1 : 0;
+	slot.busy = false;
 	gibsImagery.set({ status: 'ready', day: slot.day });
 
 	setTimeout(() => {
@@ -284,10 +300,16 @@ const pump = async (): Promise<void> => {
 			const target = hidden();
 			if (target.day !== day || target.forLayerId !== layer.id) {
 				gibsImagery.set({ status: 'loading', day });
+				// Claimed before the fetch: a preload arriving meanwhile must not
+				// retarget the slot out from under this frame.
+				target.busy = true;
 				retarget(target, layer, day);
+			} else {
+				target.busy = true;
 			}
 
 			const loaded = await waitForSlot(target);
+			target.busy = false;
 
 			// A newer request landed while this frame was loading: start over.
 			if (
@@ -325,8 +347,8 @@ export const preloadGibsDay = (day: string | undefined): void => {
 	if (!layer) return;
 	const slot = hidden();
 	if (slot.day === day && slot.forLayerId === layer.id) return;
-	// Never disturb the slot that is currently becoming visible.
-	if (slot.awaitingRender) return;
+	// Never disturb the slot the pump is filling, or one that is becoming visible.
+	if (slot.busy || slot.awaitingRender) return;
 	retarget(slot, layer, day);
 };
 

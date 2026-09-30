@@ -62,6 +62,15 @@
 							<Kbd.Root>n</Kbd.Root> Latest Model Run
 						</div>
 						<div class="mt-3 flex items-center gap-2">
+							<Kbd.Root>space</Kbd.Root> Replay: play / pause
+						</div>
+						<div class="flex items-center gap-2">
+							<Kbd.Root>,</Kbd.Root> Replay: previous frame
+						</div>
+						<div class="flex items-center gap-2">
+							<Kbd.Root>.</Kbd.Root> Replay: next frame
+						</div>
+						<div class="mt-3 flex items-center gap-2">
 							<Kbd.Root>ctrl</Kbd.Root> +
 							<Kbd.Root>←</Kbd.Root> Previous Model Run
 						</div>

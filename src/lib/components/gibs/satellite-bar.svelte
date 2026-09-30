@@ -31,6 +31,9 @@
 		setGibsDate
 	} from '$lib/stores/gibs';
 	import { map } from '$lib/stores/map';
+	import { replayFrom, replayOpen, replayTo, setReplayRange } from '$lib/stores/replay';
+
+	import RangeBrush from '$lib/components/time/range-brush.svelte';
 
 	import {
 		GIBS_CATEGORIES,
@@ -42,9 +45,7 @@
 		gibsRibbonFraction,
 		gibsRibbonSegments,
 		gibsTileUrl,
-		gibsWorldviewUrl,
-		isoDayDiff,
-		shiftIsoDay
+		gibsWorldviewUrl
 	} from '$lib/gibs';
 	import { gibsDatasetLabel, gibsDatasetOf, gibsDatasetSearchUrl } from '$lib/gibs-datasets';
 
@@ -56,17 +57,14 @@
 	const earliest = $derived(availability.ranges[0]?.start);
 	const latest = $derived($gibsLatestDate);
 	const dataset = $derived(gibsDatasetOf(layer.id));
-	const ribbon = $derived(
+	/** Availability spans, drawn as the rail's texture by the brush. */
+	const segments = $derived(
 		earliest && latest ? gibsRibbonSegments(availability.ranges, earliest, latest) : []
 	);
 	const marker = $derived(
 		earliest && latest && $gibsResolvedDate
 			? gibsRibbonFraction($gibsResolvedDate, earliest, latest)
 			: undefined
-	);
-	const spanDays = $derived(earliest && latest ? Math.max(1, isoDayDiff(earliest, latest)) : 1);
-	const sliderValue = $derived(
-		earliest && $gibsResolvedDate ? Math.max(0, isoDayDiff(earliest, $gibsResolvedDate)) : 0
 	);
 	/** Requested day GIBS cannot serve, so a neighbouring day is drawn instead. */
 	const awayFromRequest = $derived(
@@ -81,10 +79,6 @@
 	);
 
 	let detailsOpen = $state(false);
-
-	const onSlider = (value: number): void => {
-		if (earliest) setGibsDate(shiftIsoDay(earliest, value));
-	};
 
 	const backToForecast = (): void => {
 		exitGibsBrowse();
@@ -187,32 +181,19 @@
 		>
 			<SkipForward size={12} /> Latest
 		</button>
-		<div class="min-w-16 flex-1">
-			<input
-				type="range"
-				class="w-full accent-sky-500"
-				min="0"
-				max={spanDays}
-				value={sliderValue}
-				oninput={(event) => onSlider(Number(event.currentTarget.value))}
-				aria-label="Day across the archived record"
+		<div class="min-w-24 flex-1">
+			<!-- One rail for the archive: the record's published spans, the day on
+			     screen, and — while a replay is being set up — its interval. -->
+			<RangeBrush
+				min={earliest ?? layer.coverageStart}
+				max={latest ?? layer.coverageStart}
+				from={$replayOpen ? $replayFrom : undefined}
+				to={$replayOpen ? $replayTo : undefined}
+				{marker}
+				{segments}
+				onchange={(nextFrom, nextTo) => setReplayRange({ from: nextFrom, to: nextTo })}
+				onseek={(day) => setGibsDate(day)}
 			/>
-			{#if ribbon.length}
-				<div class="relative h-1.5 w-full overflow-hidden rounded bg-black/10 dark:bg-white/10">
-					{#each ribbon as segment, index (index)}
-						<span
-							class="absolute inset-y-0 bg-sky-500/70"
-							style={`left:${(segment.left * 100).toFixed(3)}%;width:${(segment.width * 100).toFixed(3)}%`}
-						></span>
-					{/each}
-					{#if marker !== undefined}
-						<span
-							class="absolute inset-y-0 w-[2px] -translate-x-1/2 bg-black/80 dark:bg-white"
-							style={`left:${(marker * 100).toFixed(3)}%`}
-						></span>
-					{/if}
-				</div>
-			{/if}
 		</div>
 	</div>
 
@@ -233,7 +214,10 @@
 					>(nearest day to {$gibsRequestedDate} — this layer has no imagery then)</span
 				>
 			{/if}
-			{#if availability.status === 'ready'}
+			{#if $replayOpen}
+				<span class="opacity-70">· drag the two handles on the rail to set the replay interval</span
+				>
+			{:else if availability.status === 'ready'}
 				<span class="hidden opacity-70 sm:inline">· {describeCoverage(availability.ranges)}</span>
 			{/if}
 		{/if}

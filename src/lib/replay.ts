@@ -292,3 +292,17 @@ export const parseReplayUrl = (
 		step: step && VALID_STEPS.includes(step) ? (step as ReplayStep) : undefined
 	};
 };
+
+/**
+ * The wall-clock span of a frame list, for warming the forecast files up ahead
+ * of a play-through. Frames are clock strings, so the span is just the first
+ * and the last one widened to the whole day.
+ */
+export const warmupRange = (frames: ReplayFrame[]): { start: Date; end: Date } | undefined => {
+	const first = frames[0];
+	const last = frames[frames.length - 1];
+	if (!first || !last) return undefined;
+	const start = new Date(`${first.slice(0, 10)}T00:00:00Z`);
+	const end = new Date(`${last.slice(0, 10)}T23:59:59Z`);
+	return start <= end ? { start, end } : undefined;
+};
