@@ -14,6 +14,10 @@ export interface TimeSelectorActions {
 	jumpToCurrentTime?: () => void;
 	toggleModelRunLock?: () => void;
 	setLatestModelRun?: () => void;
+	/** Replay transport: the space bar and one-frame steps. */
+	toggleReplay?: () => void;
+	previousFrame?: () => void;
+	nextFrame?: () => void;
 	timeNavigationDisabled?: boolean;
 }
 

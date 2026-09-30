@@ -10,6 +10,7 @@
 	import { gibsBrowse, initGibsState } from '$lib/stores/gibs';
 	import { map } from '$lib/stores/map';
 	import { initStoredState, loading, url } from '$lib/stores/preferences';
+	import { initReplayState } from '$lib/stores/replay';
 	import { installRequestCounter } from '$lib/stores/request-counter';
 	import { modelRun } from '$lib/stores/time';
 	import { domain, selectedDomain } from '$lib/stores/variables';
@@ -89,6 +90,7 @@
 		await initStoredState();
 
 		initGibsState();
+		initReplayState();
 		await createMap(mapContainer as HTMLElement);
 		startEmbedderBridge();
 

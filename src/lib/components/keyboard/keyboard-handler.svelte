@@ -108,7 +108,10 @@
 				'ArrowUp',
 				'c',
 				'm',
-				'n'
+				'n',
+				' ',
+				',',
+				'.'
 			].includes(event.key);
 			if (!isTimeAction) return;
 
@@ -123,6 +126,9 @@
 				(event.ctrlKey ? actions.nextModel : actions.nextHour)?.();
 			else if (event.key === 'ArrowDown') actions.previousDay?.();
 			else if (event.key === 'ArrowUp') actions.nextDay?.();
+			else if (event.key === ' ') actions.toggleReplay?.();
+			else if (event.key === ',') actions.previousFrame?.();
+			else if (event.key === '.') actions.nextFrame?.();
 			else if (event.key === 'c') actions.jumpToCurrentTime?.();
 			else if (event.key === 'm') actions.toggleModelRunLock?.();
 			else if (event.key === 'n') actions.setLatestModelRun?.();

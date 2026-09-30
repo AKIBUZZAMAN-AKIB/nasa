@@ -16,12 +16,14 @@
 	} from '$lib/stores/gibs';
 	import { timeSelectorActions } from '$lib/stores/keyboard';
 	import { desktop, loading } from '$lib/stores/preferences';
+	import { stepReplay, toggleReplay } from '$lib/stores/replay';
 	import { metaJson, modelRunLocked } from '$lib/stores/time';
 	import { inProgress, latest, modelRun, now, time } from '$lib/stores/time';
 	import { selectedDomain } from '$lib/stores/variables';
 
 	import SatelliteBar from '$lib/components/gibs/satellite-bar.svelte';
 	import PrefetchButton from '$lib/components/time/prefetch-button.svelte';
+	import ReplayBar from '$lib/components/time/replay-bar.svelte';
 	import * as Select from '$lib/components/ui/select';
 
 	import {
@@ -437,6 +439,9 @@
 			jumpToCurrentTime: backToNow,
 			toggleModelRunLock,
 			setLatestModelRun: latestStep,
+			toggleReplay,
+			previousFrame: () => stepReplay(-1),
+			nextFrame: () => stepReplay(1),
 			timeNavigationDisabled: disabled
 		});
 		return () => timeSelectorActions.set({});
@@ -1230,5 +1235,6 @@
 				<SatelliteBar onBackToForecast={jumpToCurrentTime} />
 			</div>
 		{/if}
+		<ReplayBar />
 	</div>
 </div>
