@@ -10,9 +10,10 @@
 	 */
 	import { Pause, Play, Repeat, SkipBack, SkipForward, X } from '@lucide/svelte';
 
-	import { gibsAvailability, gibsLatestDate, gibsLayerId } from '$lib/stores/gibs';
+	import { gibsAvailability, gibsLatestDate, gibsLatestTime, gibsLayerId } from '$lib/stores/gibs';
 	import {
 		applyReplayPreset,
+		replayFrameLimitExceeded,
 		replayFrames,
 		replayFrom,
 		replayIndex,
@@ -35,7 +36,12 @@
 	import { MILLISECONDS_PER_WEEK } from '$lib/constants';
 	import { gibsLayerById } from '$lib/gibs';
 	import { gibsImagery } from '$lib/gibs-layers';
-	import { REPLAY_STEPS, formatReplayDay, isHourlyStep } from '$lib/replay';
+	import {
+		MAX_SUBDAILY_REPLAY_FRAMES,
+		REPLAY_STEPS,
+		formatReplayDay,
+		stepsForLayer
+	} from '$lib/replay';
 
 	const availability = $derived($gibsAvailability);
 	const layer = $derived(gibsLayerById($gibsLayerId));
@@ -48,11 +54,47 @@
 			? (availability.ranges[0]?.start ?? layer?.coverageStart)
 			: forecastStart
 	);
+	const timeAware = $derived($replayMode === 'satellite' && layer?.period === 'PT30M');
+	const availableSteps = $derived(
+		$replayMode === 'satellite' && layer
+			? REPLAY_STEPS.filter((step) => stepsForLayer(layer).includes(step.value))
+			: REPLAY_STEPS.filter((step) => step.value !== '30m')
+	);
+
+	/** datetime-local fields use the browser's local zone; replay keys stay UTC. */
+	const toLocalInput = (value?: string): string => {
+		if (!value) return '';
+		const date = new Date(value);
+		if (!Number.isFinite(date.getTime())) return '';
+		return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+	};
+	const fromLocalInput = (value: string): string | undefined => {
+		if (!value) return undefined;
+		const date = new Date(value);
+		return Number.isFinite(date.getTime()) ? date.toISOString().replace('.000Z', 'Z') : undefined;
+	};
+	const timestampBound = (value?: string, endOfDay = false): string | undefined => {
+		if (!value) return undefined;
+		if (value.includes('T')) return value;
+		// A day-only brush edge means the whole UTC day, represented in the
+		// datetime-local control by its first or last native half-hour frame.
+		return `${value}T${endOfDay ? '23:30:00' : '00:00:00'}Z`;
+	};
+	const rangeInputValue = (value?: string, endOfDay = false): string =>
+		timeAware ? toLocalInput(timestampBound(value, endOfDay)) : (value?.slice(0, 10) ?? '');
+	const rangeInputBound = (value?: string, endOfDay = false): string | undefined =>
+		timeAware
+			? value
+				? toLocalInput(timestampBound(value, endOfDay))
+				: undefined
+			: value?.slice(0, 10);
 
 	const speeds = [0.5, 1, 2];
 
-	const onFrom = (value: string): void => setReplayRange({ from: value });
-	const onTo = (value: string): void => setReplayRange({ to: value });
+	const onFrom = (value: string): void =>
+		setReplayRange({ from: timeAware ? fromLocalInput(value) : value || undefined });
+	const onTo = (value: string): void =>
+		setReplayRange({ to: timeAware ? fromLocalInput(value) : value || undefined });
 	const onStep = (value: string): void =>
 		setReplayRange({ step: value as (typeof REPLAY_STEPS)[number]['value'] });
 </script>
@@ -106,24 +148,29 @@
 		<!-- Range and cadence, edited by hand -->
 		<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
 			<label class="flex items-center gap-1">
-				<span class="opacity-70">From</span>
+				<span class="opacity-70">From{timeAware ? ' (local)' : ''}</span>
 				<input
-					type="date"
+					type={timeAware ? 'datetime-local' : 'date'}
+					step={timeAware ? 1800 : undefined}
 					class="h-6 rounded border bg-transparent px-1"
-					min={minDay}
-					max={$replayTo ?? $gibsLatestDate ?? undefined}
-					value={$replayFrom ?? ''}
+					min={rangeInputBound(timeAware ? availability.timeRanges[0]?.start : minDay)}
+					max={rangeInputBound(
+						timeAware ? ($replayTo ?? $gibsLatestTime) : ($replayTo ?? $gibsLatestDate),
+						true
+					)}
+					value={rangeInputValue($replayFrom)}
 					onchange={(event) => onFrom(event.currentTarget.value)}
 				/>
 			</label>
 			<label class="flex items-center gap-1">
-				<span class="opacity-70">to</span>
+				<span class="opacity-70">to{timeAware ? ' (local)' : ''}</span>
 				<input
-					type="date"
+					type={timeAware ? 'datetime-local' : 'date'}
+					step={timeAware ? 1800 : undefined}
 					class="h-6 rounded border bg-transparent px-1"
-					min={$replayFrom ?? minDay}
-					max={$gibsLatestDate}
-					value={$replayTo ?? ''}
+					min={rangeInputBound($replayFrom ?? minDay)}
+					max={rangeInputBound(timeAware ? $gibsLatestTime : $gibsLatestDate)}
+					value={rangeInputValue($replayTo, true)}
 					onchange={(event) => onTo(event.currentTarget.value)}
 				/>
 			</label>
@@ -134,17 +181,23 @@
 					value={$replayStep}
 					onchange={(event) => onStep(event.currentTarget.value)}
 				>
-					{#each REPLAY_STEPS as step (step.value)}
-						<option
-							value={step.value}
-							disabled={$replayMode === 'satellite' && isHourlyStep(step.value)}
-						>
-							{step.label}
-						</option>
+					{#each availableSteps as step (step.value)}
+						<option value={step.value}>{step.label}</option>
 					{/each}
 				</select>
 			</label>
 			<span class="opacity-70">{$replaySummary}</span>
+			{#if timeAware}
+				<span class="opacity-60" title="Frame timestamps and map labels use UTC">
+					Local input · frame labels in UTC
+				</span>
+			{/if}
+			{#if $replayFrameLimitExceeded}
+				<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-800 dark:text-amber-200">
+					Range exceeds {MAX_SUBDAILY_REPLAY_FRAMES.toLocaleString()} frames; choose a coarser interval
+					or shorter range.
+				</span>
+			{/if}
 			{#if $replayMode === 'satellite' && $replayFrom && $replayTo}
 				<span class="hidden opacity-60 sm:inline">
 					{formatReplayDay($replayFrom)} → {formatReplayDay($replayTo)}

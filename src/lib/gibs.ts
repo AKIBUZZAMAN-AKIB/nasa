@@ -43,11 +43,11 @@ export type GibsCategory = (typeof GIBS_CATEGORIES)[number]['id'];
 
 /**
  * Temporal cadence of a layer. Daily layers accept any day inside an
- * availability range; 16-day and monthly layers accept any date but only
- * change every 16 days / month, so a requested day is snapped to the start of
- * the period its imagery belongs to.
+ * availability range; 16-day and monthly layers change only at their composite
+ * cadence; PT30M layers require an exact UTC timestamp resolved to a published
+ * half-hour frame.
  */
-export type GibsPeriod = 'P1D' | 'P16D' | 'P1M';
+export type GibsPeriod = 'P1D' | 'P16D' | 'P1M' | 'PT30M';
 
 export interface GibsLayerDef {
 	/** GIBS layer identifier (also the Worldview layer id). */
@@ -64,7 +64,7 @@ export interface GibsLayerDef {
 	resolution: string;
 	/** Source dataset short name and version (from GIBS layer metadata). */
 	dataset?: string;
-	/** First day with imagery, from the WMTS capabilities (ISO `YYYY-MM-DD`). */
+	/** First day with imagery, verified from the GIBS availability dimension (ISO `YYYY-MM-DD`). */
 	coverageStart: string;
 	/** Colour-bar SVG published by GIBS, shown under the map controls. */
 	legend?: string;
@@ -244,6 +244,20 @@ export const GIBS_LAYERS: GibsLayerDef[] = [
 		coverageStart: '2000-06-01',
 		legend: 'https://gibs.earthdata.nasa.gov/legends/GPM_Precipitation_Rate_H.svg',
 		note: 'Merged satellite + gauge rainfall — the longest satellite precipitation record on GIBS.',
+		extension: 'png'
+	},
+	{
+		id: 'IMERG_Precipitation_Rate_30min',
+		title: 'Precipitation Rate (30-minute)',
+		subtitle: 'IMERG / GPM',
+		category: 'precipitation',
+		period: 'PT30M',
+		tileMatrixSet: 'GoogleMapsCompatible_Level6',
+		resolution: '0.1° (~10 km)',
+		dataset: 'GPM_3IMERGHH v07',
+		coverageStart: '1998-01-01',
+		legend: 'https://gibs.earthdata.nasa.gov/legends/GPM_Precipitation_Rate_H.svg',
+		note: 'Rate in mm/hr for each nominal 30-minute period. The timestamp is the period start in UTC; the estimate represents its midpoint (:15 or :45). GIBS Best Available uses the Final product when available and Early near real time otherwise.',
 		extension: 'png'
 	},
 
@@ -490,11 +504,12 @@ export const gibsLayersByCategory = (category: GibsCategory): GibsLayerDef[] =>
 	GIBS_LAYERS.filter((layer) => layer.category === category);
 
 /**
- * WMTS tile template for one layer and day, with the `{z}/{x}/{y}` placeholders
- * MapLibre expects. `Time` accepts a full ISO 8601 date as used by GIBS.
+ * WMTS tile template for one layer and exact frame, with the `{z}/{x}/{y}`
+ * placeholders MapLibre expects. The GIBS `Time` value may be a day or a full
+ * UTC timestamp, depending on the layer's temporal resolution.
  */
-export const gibsTileUrl = (layer: GibsLayerDef, date: string): string =>
-	`${GIBS_BASE_URL}/${layer.id}/default/${date}/${layer.tileMatrixSet}/{z}/{y}/{x}.${layer.extension}`;
+export const gibsTileUrl = (layer: GibsLayerDef, frame: string): string =>
+	`${GIBS_BASE_URL}/${layer.id}/default/${frame}/${layer.tileMatrixSet}/{z}/{y}/{x}.${layer.extension}`;
 
 /** One contiguous run of available imagery, as published by GIBS. */
 export interface GibsAvailabilityRange {
@@ -549,6 +564,147 @@ export const parseGibsAvailability = (xml: string): GibsAvailabilityRange[] => {
 	return ranges.sort((a, b) => (a.start < b.start ? -1 : 1));
 };
 
+/** One compact run of exact sub-daily GIBS timestamps (never expanded globally). */
+export interface GibsTimeRange {
+	/** First exact UTC instant, normalized to `YYYY-MM-DDTHH:mm:ssZ`. */
+	start: string;
+	/** Last exact UTC instant, inclusive. */
+	end: string;
+	/** Interval between records in this range. */
+	stepMs: number;
+}
+
+const DURATION_HOUR_MS = 60 * 60 * 1000;
+
+/** Parse the minute/hour/second ISO durations used by sub-daily WMTS domains. */
+const isoDurationMs = (duration: string): number | undefined => {
+	const match = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(duration);
+	if (!match || !match.slice(1).some(Boolean)) return undefined;
+	return (
+		Number(match[1] ?? 0) * DURATION_HOUR_MS +
+		Number(match[2] ?? 0) * 60_000 +
+		Number(match[3] ?? 0) * 1000
+	);
+};
+
+/**
+ * Normalize a GIBS UTC frame key. Date-only input means midnight UTC; a
+ * datetime-local value must be made UTC by its caller before it reaches here.
+ */
+export const normalizeGibsTimestamp = (value: string | undefined): string | undefined => {
+	if (!value) return undefined;
+	if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+		const dayMs = Date.parse(`${value}T00:00:00Z`);
+		return Number.isFinite(dayMs) && new Date(dayMs).toISOString().slice(0, 10) === value
+			? `${value}T00:00:00Z`
+			: undefined;
+	}
+	const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?::(\d{2}))?Z$/.exec(value);
+	if (!match) return undefined;
+	const canonical = `${match[1]}:${match[2] ?? '00'}Z`;
+	const ms = Date.parse(canonical);
+	return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 19) === canonical.slice(0, 19)
+		? canonical
+		: undefined;
+};
+
+const timeBoundaryMs = (value: string, isEnd: boolean, stepMs: number): number | undefined => {
+	if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+		const midnight = Date.parse(`${value}T00:00:00Z`);
+		if (!Number.isFinite(midnight)) return undefined;
+		// DescribeDomains compacts date-bounded sub-daily windows to whole days.
+		// A date-only start is 00:00Z; a date-only inclusive end is the last
+		// cadence slot of that UTC day (e.g. 23:30Z for PT30M).
+		return isEnd ? midnight + DAY_MS - stepMs : midnight;
+	}
+	const normalized = normalizeGibsTimestamp(value);
+	return normalized ? Date.parse(normalized) : undefined;
+};
+
+/**
+ * Parse the DescribeDomains `time` dimension without turning a 28.75-year,
+ * 30-minute archive into ~504,000 strings. GIBS may shorten date-only range
+ * bounds; those mean the start/end of the UTC day at the published cadence.
+ */
+export const parseGibsTimeAvailability = (xml: string): GibsTimeRange[] => {
+	const domain = /<Domain>([\s\S]*?)<\/Domain>/i.exec(xml)?.[1];
+	if (!domain || !domain.trim()) return [];
+	const ranges: GibsTimeRange[] = [];
+	for (const part of domain.split(',')) {
+		const [start, end, duration] = part.trim().split('/');
+		if (!start || !end || !duration) continue;
+		const stepMs = isoDurationMs(duration);
+		if (!stepMs) continue;
+		const startMs = timeBoundaryMs(start, false, stepMs);
+		const rawEndMs = timeBoundaryMs(end, true, stepMs);
+		if (startMs === undefined || rawEndMs === undefined || rawEndMs < startMs) continue;
+		const endMs = startMs + Math.floor((rawEndMs - startMs) / stepMs) * stepMs;
+		ranges.push({
+			start: new Date(startMs).toISOString().replace('.000Z', 'Z'),
+			end: new Date(endMs).toISOString().replace('.000Z', 'Z'),
+			stepMs
+		});
+	}
+	return ranges.sort((a, b) => a.start.localeCompare(b.start));
+};
+
+/** Project half-hour availability onto days for the shared archive rail. */
+export const gibsTimeRangesToDayRanges = (ranges: GibsTimeRange[]): GibsAvailabilityRange[] => {
+	const days = ranges
+		.map((range) => ({ start: range.start.slice(0, 10), end: range.end.slice(0, 10) }))
+		.sort((a, b) => a.start.localeCompare(b.start));
+	const merged: GibsAvailabilityRange[] = [];
+	for (const day of days) {
+		const previous = merged[merged.length - 1];
+		if (previous && day.start <= shiftIsoDay(previous.end, 1)) {
+			if (day.end > previous.end) previous.end = day.end;
+		} else {
+			merged.push({ start: day.start, end: day.end, stepDays: 1, step: 'P1D' });
+		}
+	}
+	return merged;
+};
+
+/** Earliest and latest exact timestamps published by a sub-daily layer. */
+export const earliestAvailableTime = (ranges: GibsTimeRange[]): string | undefined =>
+	ranges[0]?.start;
+export const latestAvailableTime = (ranges: GibsTimeRange[]): string | undefined =>
+	ranges[ranges.length - 1]?.end;
+
+/** Closest real frame to a requested UTC timestamp; ties choose the earlier frame. */
+export const resolveAvailableTime = (
+	ranges: GibsTimeRange[],
+	requested: string
+): string | undefined => {
+	const normalized = normalizeGibsTimestamp(requested);
+	if (!normalized || !ranges.length) return undefined;
+	const target = Date.parse(normalized);
+	let nearest: number | undefined;
+	let nearestDistance = Number.POSITIVE_INFINITY;
+	for (const range of ranges) {
+		const start = Date.parse(range.start);
+		const end = Date.parse(range.end);
+		const clamped = Math.min(end, Math.max(start, target));
+		const offset = (clamped - start) / range.stepMs;
+		const lower = Math.floor(offset);
+		const index = lower + (offset - lower > 0.5 ? 1 : 0); // exact ties choose the earlier frame
+		const candidate = Math.min(end, start + index * range.stepMs);
+		const distance = Math.abs(candidate - target);
+		if (distance < nearestDistance) {
+			nearest = candidate;
+			nearestDistance = distance;
+		}
+	}
+	return nearest === undefined ? undefined : new Date(nearest).toISOString().replace('.000Z', 'Z');
+};
+
+/** Shift a canonical GIBS timestamp by whole minutes. */
+export const shiftGibsTimestamp = (value: string, minutes: number): string | undefined => {
+	const normalized = normalizeGibsTimestamp(value);
+	if (!normalized || !Number.isFinite(minutes)) return undefined;
+	return new Date(Date.parse(normalized) + minutes * 60_000).toISOString().replace('.000Z', 'Z');
+};
+
 /** The available-dates request for a layer and window (start and end inclusive). */
 export const gibsAvailabilityUrl = (layer: GibsLayerDef, start: string, end: string): string =>
 	`${GIBS_BASE_URL}/1.0.0/${layer.id}/default/${layer.tileMatrixSet}/all/${start}--${end}.xml`;
@@ -577,7 +733,7 @@ export const snapToPeriod = (
 	ranges: GibsAvailabilityRange[] = []
 ): string => {
 	if (layer.period === 'P1M') return `${day.slice(0, 7)}-01`;
-	if (layer.period === 'P1D') return day;
+	if (layer.period === 'P1D' || layer.period === 'PT30M') return day;
 	const range = rangeAt(ranges, day);
 	if (!range) return day;
 	const offset = isoDayDiff(range.start, day);
@@ -691,7 +847,14 @@ export const formatGibsDay = (day: string, locale = 'en-GB'): string =>
 		month: 'short',
 		year: 'numeric',
 		timeZone: 'UTC'
-	}).format(new Date(`${day}T00:00:00Z`));
+	}).format(new Date(`${day.slice(0, 10)}T00:00:00Z`));
+
+/** Readable label for the exact frame key, explicitly in NASA's UTC time axis. */
+export const formatGibsTimestamp = (value: string, locale = 'en-GB'): string => {
+	const timestamp = normalizeGibsTimestamp(value);
+	if (!timestamp) return value;
+	return `${formatGibsDay(timestamp.slice(0, 10), locale)} ${timestamp.slice(11, 16)} UTC`;
+};
 
 /**
  * `2024-06-15T13:45:00Z` → `2024-06-15`: the day the app's clock points at, in
@@ -709,6 +872,7 @@ export const isoDayAtNoon = (day: string): Date => new Date(`${day}T12:00:00Z`);
 /** Address-bar keys for a shared satellite view. */
 export const GIBS_URL_LAYER_PARAM = 'gibs';
 export const GIBS_URL_DATE_PARAM = 'gibs-date';
+export const GIBS_URL_TIME_PARAM = 'gibs-time';
 
 /**
  * Parameters to write for the current selection. Defaults stay out of the URL:
@@ -721,12 +885,18 @@ export const gibsUrlParams = (state: {
 	layerId: string;
 	day?: string;
 	latest?: string;
+	timestamp?: string;
+	latestTimestamp?: string;
 	defaultLayerId: string;
 }): Record<string, string> => {
 	if (!state.browsing) return {};
 	const params: Record<string, string> = {};
 	if (state.layerId !== state.defaultLayerId) params[GIBS_URL_LAYER_PARAM] = state.layerId;
-	if (state.day && state.day !== state.latest) params[GIBS_URL_DATE_PARAM] = state.day;
+	if (state.timestamp) {
+		if (state.timestamp !== state.latestTimestamp) params[GIBS_URL_TIME_PARAM] = state.timestamp;
+	} else if (state.day && state.day !== state.latest) {
+		params[GIBS_URL_DATE_PARAM] = state.day;
+	}
 	return params;
 };
 
@@ -734,13 +904,17 @@ export const gibsUrlParams = (state: {
 const isIsoDay = (value: string | null | undefined): value is string =>
 	!!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && shiftIsoDay(value, 0) === value;
 
-/** Layer id and day from a location search string, ignoring anything invalid. */
-export const parseGibsUrl = (search: string): { layerId?: string; day?: string } => {
+/** Layer and exact frame from a location search string, ignoring invalid values. */
+export const parseGibsUrl = (
+	search: string
+): { layerId?: string; day?: string; timestamp?: string } => {
 	const params = new URLSearchParams(search);
 	const layerId = params.get(GIBS_URL_LAYER_PARAM);
+	const timestamp = normalizeGibsTimestamp(params.get(GIBS_URL_TIME_PARAM) ?? undefined);
 	const day = params.get(GIBS_URL_DATE_PARAM);
 	return {
 		layerId: layerId && gibsLayerById(layerId) ? layerId : undefined,
-		day: isIsoDay(day) ? day : undefined
+		day: timestamp?.slice(0, 10) ?? (isIsoDay(day) ? day : undefined),
+		timestamp
 	};
 };

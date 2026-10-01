@@ -25,10 +25,13 @@
 		gibsLayerId,
 		gibsOpacity,
 		gibsRequestedDate,
+		gibsRequestedTime,
 		gibsResolvedDate,
+		gibsResolvedTime,
 		goToLatestGibs,
 		selectGibsLayer,
-		setGibsDate
+		setGibsDate,
+		setGibsTimeOfDay
 	} from '$lib/stores/gibs';
 	import { map } from '$lib/stores/map';
 	import { replayFrom, replayOpen, replayTo, setReplayRange } from '$lib/stores/replay';
@@ -40,12 +43,14 @@
 		GIBS_LAYERS,
 		describeCoverage,
 		formatGibsDay,
+		formatGibsTimestamp,
 		gibsLayerById,
 		gibsLayersByCategory,
 		gibsRibbonFraction,
 		gibsRibbonSegments,
 		gibsTileUrl,
-		gibsWorldviewUrl
+		gibsWorldviewUrl,
+		shiftGibsTimestamp
 	} from '$lib/gibs';
 	import { gibsDatasetLabel, gibsDatasetOf, gibsDatasetSearchUrl } from '$lib/gibs-datasets';
 
@@ -66,16 +71,21 @@
 			? gibsRibbonFraction($gibsResolvedDate, earliest, latest)
 			: undefined
 	);
-	/** Requested day GIBS cannot serve, so a neighbouring day is drawn instead. */
+	const timeAware = $derived(layer.period === 'PT30M');
+	/** Requested frame GIBS cannot serve, so a neighbour is drawn instead. */
 	const awayFromRequest = $derived(
-		!!$gibsRequestedDate && !!$gibsResolvedDate && $gibsRequestedDate !== $gibsResolvedDate
+		timeAware
+			? !!$gibsRequestedTime && !!$gibsResolvedTime && $gibsRequestedTime !== $gibsResolvedTime
+			: !!$gibsRequestedDate && !!$gibsResolvedDate && $gibsRequestedDate !== $gibsResolvedDate
 	);
 	const cadence = $derived(
-		layer.period === 'P1M'
-			? 'monthly composite'
-			: layer.period === 'P16D'
-				? '16-day composite'
-				: 'daily'
+		layer.period === 'PT30M'
+			? '30-minute rate'
+			: layer.period === 'P1M'
+				? 'monthly composite'
+				: layer.period === 'P16D'
+					? '16-day composite'
+					: 'daily'
 	);
 
 	let detailsOpen = $state(false);
@@ -85,13 +95,19 @@
 		onBackToForecast();
 	};
 
+	const midpointLabel = (timestamp?: string): string | undefined => {
+		if (!timestamp) return undefined;
+		const midpoint = shiftGibsTimestamp(timestamp, 15);
+		return midpoint ? formatGibsTimestamp(midpoint) : undefined;
+	};
+
 	const copyTileUrl = (): void => {
-		const day = $gibsResolvedDate;
-		if (!day) return;
+		const frame = $gibsResolvedTime ?? $gibsResolvedDate;
+		if (!frame) return;
 		// The template keeps its {z}/{y}/{x} placeholders: paste it into QGIS,
 		// Leaflet or any other WMTS/XYZ client and it works as-is.
 		void navigator.clipboard
-			.writeText(gibsTileUrl(layer, day))
+			.writeText(gibsTileUrl(layer, frame))
 			.then(() => toast.success('Tile URL copied'))
 			.catch(() => toast.error('Could not copy the tile URL'));
 	};
@@ -133,7 +149,7 @@
 			{/each}
 		</select>
 		<span class="rounded bg-black/5 px-1.5 py-0.5 whitespace-nowrap dark:bg-white/10">
-			{layer.resolution} · {cadence}
+			{layer.resolution} · {cadence}{timeAware ? ' (UTC)' : ''}
 		</span>
 		{#if dataset}
 			<a
@@ -174,10 +190,26 @@
 			onchange={(event) => setGibsDate(event.currentTarget.value)}
 			aria-label="Satellite day"
 		/>
+		{#if timeAware}
+			<label
+				class="flex shrink-0 items-center gap-1"
+				title="IMERG timestamps are UTC period starts"
+			>
+				<input
+					type="time"
+					step="1800"
+					class="h-7 w-24 rounded border bg-transparent px-1.5 text-xs"
+					value={$gibsResolvedTime?.slice(11, 16) ?? ''}
+					onchange={(event) => setGibsTimeOfDay(event.currentTarget.value)}
+					aria-label="UTC frame time"
+				/>
+				<span class="text-[0.65rem] opacity-70">UTC</span>
+			</label>
+		{/if}
 		<button
 			class="inline-flex h-7 shrink-0 items-center gap-1 rounded border px-1.5 hover:bg-black/10 dark:hover:bg-white/15"
 			onclick={() => void goToLatestGibs()}
-			title="Most recent day with imagery"
+			title={timeAware ? 'Most recent published UTC frame' : 'Most recent day with imagery'}
 		>
 			<SkipForward size={12} /> Latest
 		</button>
@@ -200,16 +232,34 @@
 	<!-- The accurate readout: what is drawn, and what was asked for -->
 	<p class="leading-tight">
 		{#if availability.status === 'loading'}
-			<span class="opacity-70">Checking which days this layer has…</span>
+			<span class="opacity-70">Checking which {timeAware ? 'frames' : 'days'} this layer has…</span>
 		{:else if availability.status === 'error'}
 			<span class="text-red-700 dark:text-red-300">
-				Could not read the GIBS availability list ({availability.error}) — the day cannot be
-				verified, so nothing is drawn.
+				Could not read the GIBS availability list ({availability.error}) — the {timeAware
+					? 'frame'
+					: 'day'} cannot be verified, so nothing is drawn.
 			</span>
 		{:else}
 			Showing
-			<span class="font-medium">{$gibsResolvedDate ? formatGibsDay($gibsResolvedDate) : '—'}</span>
-			{#if awayFromRequest}
+			<span class="font-medium">
+				{#if timeAware && $gibsResolvedTime}
+					{formatGibsTimestamp($gibsResolvedTime)}
+				{:else if $gibsResolvedDate}
+					{formatGibsDay($gibsResolvedDate)}
+				{:else}
+					—
+				{/if}
+			</span>
+			{#if timeAware && $gibsResolvedTime}
+				<span class="opacity-70">
+					· period start; nominal estimate midpoint {midpointLabel($gibsResolvedTime)}
+				</span>
+			{/if}
+			{#if awayFromRequest && timeAware}
+				<span class="opacity-70"
+					>(nearest published frame to {formatGibsTimestamp($gibsRequestedTime ?? '')})</span
+				>
+			{:else if awayFromRequest}
 				<span class="opacity-70"
 					>(nearest day to {$gibsRequestedDate} — this layer has no imagery then)</span
 				>
@@ -278,7 +328,8 @@
 				<a href="https://gibs.earthdata.nasa.gov" class="underline" rel="noreferrer" target="_blank"
 					>NASA GIBS / EOSDIS</a
 				>, free and without a key. This layer's record starts {layer.coverageStart}; the address bar
-				carries the layer and the day, so the view can be shared as a link.
+				carries the layer and exact frame time when this layer needs it, so the view can be shared
+				as a link.
 			</p>
 		</div>
 	{/if}

@@ -14,12 +14,16 @@
 import {
 	type GibsAvailabilityRange,
 	type GibsLayerDef,
+	type GibsPeriod,
+	type GibsTimeRange,
 	isoDayDiff,
+	normalizeGibsTimestamp,
 	resolveAvailableDay,
+	resolveAvailableTime,
 	shiftIsoDay
 } from './gibs';
 
-export type ReplayStep = '1h' | '3h' | '6h' | '1d' | '3d' | '7d' | '16d' | '1M';
+export type ReplayStep = '30m' | '1h' | '3h' | '6h' | '1d' | '3d' | '7d' | '16d' | '1M';
 
 export interface ReplayStepDef {
 	value: ReplayStep;
@@ -31,6 +35,7 @@ export interface ReplayStepDef {
 }
 
 export const REPLAY_STEPS: ReplayStepDef[] = [
+	{ value: '30m', label: '30 minutes', hours: 0.5, days: 1 / 48 },
 	{ value: '1h', label: '1 hour', hours: 1, days: 1 },
 	{ value: '3h', label: '3 hours', hours: 3, days: 1 },
 	{ value: '6h', label: '6 hours', hours: 6, days: 1 },
@@ -42,15 +47,18 @@ export const REPLAY_STEPS: ReplayStepDef[] = [
 ];
 
 export const replayStepDef = (step: ReplayStep): ReplayStepDef =>
-	REPLAY_STEPS.find((entry) => entry.value === step) ?? REPLAY_STEPS[3];
+	REPLAY_STEPS.find((entry) => entry.value === step) ??
+	REPLAY_STEPS.find((entry) => entry.value === '1d')!;
 
 export const stepLabel = (step: ReplayStep): string => replayStepDef(step).label;
 
-/** Steps that only make sense in the forecast: the imagery is daily at best. */
-export const isHourlyStep = (step: ReplayStep): boolean => step.endsWith('h');
+/** Hourly model steps; GIBS imagery has its own layer-specific choices. */
+export const isHourlyStep = (step: ReplayStep): boolean =>
+	step === '1h' || step === '3h' || step === '6h';
 
-/** Steps the layer itself moves in (a monthly composite has no daily change). */
+/** Steps the layer can show without repeating a coarser composite. */
 export const stepsForLayer = (layer: GibsLayerDef): ReplayStep[] => {
+	if (layer.period === 'PT30M') return ['30m', '1h', '3h', '6h', '1d', '3d', '7d', '16d', '1M'];
 	if (layer.period === 'P1M') return ['1M', '16d', '7d'];
 	if (layer.period === 'P16D') return ['16d', '1M', '7d'];
 	return ['1d', '3d', '7d', '16d', '1M'];
@@ -80,6 +88,9 @@ export const satelliteFrames = (
 ): ReplayFrame[] => {
 	if (!ranges.length || from > to) return [];
 	const days = replayStepDef(step).days;
+	// Sub-day steps are only meaningful on PT30M layers; never let a date-only
+	// layer spin forever when given a malformed or stale fine-cadence setting.
+	if (!Number.isFinite(days) || days < 1) return [];
 	const frames: ReplayFrame[] = [];
 	let previous: string | undefined;
 
@@ -103,6 +114,113 @@ export const satelliteFrames = (
 	}
 
 	return frames;
+};
+
+/** A protective ceiling: a full half-hour archive is hundreds of thousands of frames. */
+export const MAX_SUBDAILY_REPLAY_FRAMES = 5000;
+
+export interface SubdailyFrameResult {
+	frames: ReplayFrame[];
+	limitExceeded: boolean;
+}
+
+const formatUtcInstant = (milliseconds: number): string =>
+	new Date(milliseconds).toISOString().replace('.000Z', 'Z');
+
+/** Calendar-month increment that clamps Jan 31 to the target month's last day. */
+const shiftUtcMonth = (milliseconds: number, months: number): number => {
+	const current = new Date(milliseconds);
+	const wantedDay = current.getUTCDate();
+	const target = new Date(
+		Date.UTC(
+			current.getUTCFullYear(),
+			current.getUTCMonth() + months,
+			1,
+			current.getUTCHours(),
+			current.getUTCMinutes(),
+			current.getUTCSeconds()
+		)
+	);
+	const endOfMonth = new Date(
+		Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)
+	).getUTCDate();
+	target.setUTCDate(Math.min(wantedDay, endOfMonth));
+	return target.getTime();
+};
+
+/**
+ * Time-aware satellite frames. The compact GIBS ranges stay compressed; only
+ * the user-selected interval is sampled. Missing half-hours are skipped, never
+ * synthesized. Very large 30-minute ranges stop at a visible 5,000-frame cap.
+ */
+export const subdailyFrames = (
+	ranges: GibsTimeRange[],
+	from: string,
+	to: string,
+	step: ReplayStep
+): SubdailyFrameResult => {
+	const bound = (value: string, endOfDay: boolean): string | undefined => {
+		if (/^\d{4}-\d{2}-\d{2}$/.test(value))
+			return normalizeGibsTimestamp(`${value}T${endOfDay ? '23:59:59' : '00:00:00'}Z`);
+		return normalizeGibsTimestamp(value);
+	};
+	const normalizedFrom = bound(from, false);
+	const normalizedTo = bound(to, true);
+	if (!ranges.length || !normalizedFrom || !normalizedTo || normalizedFrom > normalizedTo)
+		return { frames: [], limitExceeded: false };
+
+	const start = Date.parse(normalizedFrom);
+	const end = Date.parse(normalizedTo);
+	const frames: ReplayFrame[] = [];
+	const seen = new Set<string>();
+	const add = (frame: string): boolean => {
+		if (seen.has(frame)) return true;
+		seen.add(frame);
+		frames.push(frame);
+		return frames.length <= MAX_SUBDAILY_REPLAY_FRAMES;
+	};
+	const availableStep = Math.min(...ranges.map((range) => range.stepMs));
+
+	if (step === '1M') {
+		for (let candidate = start; candidate <= end; candidate = shiftUtcMonth(candidate, 1)) {
+			const resolved = resolveAvailableTime(ranges, formatUtcInstant(candidate));
+			if (!resolved) continue;
+			const resolvedMs = Date.parse(resolved);
+			// A month sampled inside a long outage is not a valid frame: only snap
+			// when the nearest published timestamp is within one native interval.
+			if (Math.abs(resolvedMs - candidate) > availableStep / 2) continue;
+			if (resolvedMs >= start && resolvedMs <= end && !add(resolved))
+				return { frames: [], limitExceeded: true };
+		}
+	} else {
+		const strideMs = replayStepDef(step).hours * 60 * 60 * 1000;
+		if (strideMs < availableStep) return { frames: [], limitExceeded: false };
+
+		for (const range of ranges) {
+			const rangeStart = Date.parse(range.start);
+			const rangeEnd = Date.parse(range.end);
+			const lower = Math.max(start, rangeStart);
+			const upper = Math.min(end, rangeEnd);
+			if (lower > upper) continue;
+
+			let index = Math.max(0, Math.ceil((lower - start) / strideMs));
+			let candidate = start + index * strideMs;
+			// Both the requested cadence and native cadence are UTC intervals.
+			// Skip a misaligned candidate instead of letting GIBS silently snap it.
+			while (candidate <= upper) {
+				if ((candidate - rangeStart) % range.stepMs === 0 && !add(formatUtcInstant(candidate)))
+					return { frames: [], limitExceeded: true };
+				index += 1;
+				candidate = start + index * strideMs;
+			}
+		}
+
+		// Do not append an off-cadence endpoint: every emitted frame keeps the
+		// selected interval (e.g. hourly stays hourly, even at the range edge).
+	}
+
+	frames.sort((a, b) => a.localeCompare(b));
+	return { frames, limitExceeded: false };
 };
 
 /**
@@ -132,15 +250,28 @@ export const forecastFrames = (
 	return frames;
 };
 
-/** Nearest frame index to a clock value, so a replay can pick up where the map is. */
+const replayInstantMs = (value: string): number => {
+	const normalized = normalizeGibsTimestamp(value);
+	if (normalized) return Date.parse(normalized);
+	// Forecast frame keys use the app's compact UTC shape: YYYY-MM-DDTHHMM.
+	const compact = /^(\d{4}-\d{2}-\d{2})T(\d{2})(\d{2})$/.exec(value);
+	if (compact) return Date.parse(`${compact[1]}T${compact[2]}:${compact[3]}:00Z`);
+	return Number.NaN;
+};
+
+/** Nearest exact frame, including clock time when the layer is sub-daily. */
 export const frameIndexFor = (frames: ReplayFrame[], value?: string): number => {
 	if (!frames.length) return 0;
 	if (!value) return frames.length - 1;
-	const day = value.slice(0, 10);
+	const target = replayInstantMs(value);
+	if (!Number.isFinite(target)) return 0;
 	let best = 0;
 	let bestDistance = Number.POSITIVE_INFINITY;
 	frames.forEach((frame, index) => {
-		const distance = Math.abs(isoDayDiff(frame.slice(0, 10), day));
+		const frameMs = replayInstantMs(frame);
+		const distance = Number.isFinite(frameMs)
+			? Math.abs(frameMs - target)
+			: Math.abs(isoDayDiff(frame.slice(0, 10), value.slice(0, 10))) * 86_400_000;
 		if (distance < bestDistance) {
 			bestDistance = distance;
 			best = index;
@@ -149,14 +280,20 @@ export const frameIndexFor = (frames: ReplayFrame[], value?: string): number => 
 	return best;
 };
 
-/** `1 Jun 2024` style label for the range summary. */
-export const formatReplayDay = (day: string): string =>
-	new Intl.DateTimeFormat('en-GB', {
+/** Human-readable UTC label for a day or exact frame key. */
+export const formatReplayDay = (value: string): string => {
+	const day = value.slice(0, 10);
+	const formatted = new Intl.DateTimeFormat('en-GB', {
 		day: 'numeric',
 		month: 'short',
 		year: 'numeric',
 		timeZone: 'UTC'
 	}).format(new Date(`${day}T00:00:00Z`));
+	const normalized = normalizeGibsTimestamp(value);
+	if (normalized && value.includes('T')) return `${formatted} ${normalized.slice(11, 16)} UTC`;
+	const compact = /T(\d{2})(\d{2})$/.exec(value);
+	return compact ? `${formatted} ${compact[1]}:${compact[2]} UTC` : formatted;
+};
 
 export interface ReplayPreset {
 	id: string;
@@ -176,11 +313,14 @@ export interface ReplayPreset {
  */
 export const replayPresets = (options: {
 	latestDay?: string;
+	latestTime?: string;
 	coverageStart?: string;
 	forecastStart?: string;
+	temporalResolution?: GibsPeriod;
 	today: string;
 }): ReplayPreset[] => {
-	const { latestDay, coverageStart, forecastStart, today } = options;
+	const { latestDay, latestTime, coverageStart, forecastStart, temporalResolution, today } =
+		options;
 	const last = latestDay ?? today;
 	const year = Number(last.slice(0, 4));
 	// Before this year's monsoon has started, the useful season is last year's:
@@ -245,6 +385,64 @@ export const replayPresets = (options: {
 		}
 	];
 
+	if (temporalResolution === 'PT30M') {
+		const latestFrame = latestTime ?? `${last}T23:30:00Z`;
+		const latestMs = Date.parse(latestFrame);
+		const atUtcTime = latestFrame.slice(10);
+		const shiftFrame = (minutes: number): string =>
+			new Date(latestMs + minutes * 60_000).toISOString().replace('.000Z', 'Z');
+		presets.push(
+			{
+				id: 'satellite-24h',
+				label: 'Last 24 hours · 30 min',
+				hint: 'Every available 30-minute IMERG frame in the latest day',
+				mode: 'satellite',
+				from: shiftFrame(-24 * 60),
+				to: latestFrame,
+				step: '30m'
+			},
+			{
+				id: 'satellite-week',
+				label: 'Last 7 days · hourly',
+				hint: 'Hourly samples of the most recent seven days of IMERG',
+				mode: 'satellite',
+				from: shiftFrame(-7 * 24 * 60),
+				to: latestFrame,
+				step: '1h'
+			}
+		);
+
+		for (const preset of presets) {
+			switch (preset.id) {
+				case 'satellite-month':
+					preset.label = 'Last 30 days · 6-hour';
+					preset.hint = 'Six-hour samples across the latest 30 days';
+					preset.from = shiftFrame(-29 * 24 * 60);
+					preset.to = latestFrame;
+					preset.step = '6h';
+					break;
+				case 'satellite-monsoon':
+					preset.label = 'Monsoon · daily';
+					preset.hint = 'One UTC-day sample from June to September';
+					preset.from = `${seasonYear}-06-01${atUtcTime}`;
+					preset.to = last < monsoonEnd ? latestFrame : `${monsoonEnd}${atUtcTime}`;
+					break;
+				case 'satellite-year':
+					preset.label = 'This year · daily';
+					preset.hint = 'One UTC-day sample from January to the latest published frame';
+					preset.from = `${year}-01-01${atUtcTime}`;
+					preset.to = latestFrame;
+					break;
+				case 'satellite-all':
+					preset.label = 'Whole archive · monthly';
+					preset.hint = 'One frame per month across the half-hourly record';
+					preset.from = `${coverageStart ?? `${year}-01-01`}${atUtcTime}`;
+					preset.to = latestFrame;
+					break;
+			}
+		}
+	}
+
 	// A preset that cannot show anything (an unknown archive, a range that runs
 	// backwards) is dropped rather than offered as a dead button.
 	return presets.filter((preset) => preset.from <= preset.to);
@@ -285,10 +483,14 @@ export const parseReplayUrl = (
 	const from = params.get(REPLAY_URL_FROM);
 	const to = params.get(REPLAY_URL_TO);
 	const step = params.get(REPLAY_URL_STEP);
-	const valid = (value: string | null): value is string => !!value && ISO_DAY.test(value);
+	const parseBound = (value: string | null): string | undefined => {
+		if (!value) return undefined;
+		if (ISO_DAY.test(value)) return normalizeGibsTimestamp(value) ? value : undefined;
+		return normalizeGibsTimestamp(value);
+	};
 	return {
-		from: valid(from) ? from : undefined,
-		to: valid(to) ? to : undefined,
+		from: parseBound(from),
+		to: parseBound(to),
 		step: step && VALID_STEPS.includes(step) ? (step as ReplayStep) : undefined
 	};
 };

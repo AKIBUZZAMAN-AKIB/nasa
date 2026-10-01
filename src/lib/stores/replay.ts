@@ -22,7 +22,13 @@ import { browser } from '$app/environment';
 import { activeChart, pickPrimaryVariable } from '$lib/stores/chart';
 import { loading } from '$lib/stores/preferences';
 
-import { gibsLayerById, isoDayOf, latestAvailableDay } from '$lib/gibs';
+import {
+	earliestAvailableTime,
+	gibsLayerById,
+	isoDayOf,
+	latestAvailableDay,
+	latestAvailableTime
+} from '$lib/gibs';
 import { type PrefetchProgress, prefetchData } from '$lib/prefetch';
 import {
 	REPLAY_URL_FROM,
@@ -34,18 +40,18 @@ import {
 	type ReplayStep,
 	forecastFrames,
 	frameIndexFor,
-	isHourlyStep,
 	parseReplayUrl,
 	replayPresets,
 	replayUrlParams,
 	satelliteFrames,
 	stepLabel,
 	stepsForLayer,
+	subdailyFrames,
 	warmupRange
 } from '$lib/replay';
 import { formatISOWithoutTimezone, parseISOWithoutTimezone } from '$lib/time-format';
 
-import { gibsImagery, preloadGibsDay } from '../gibs-layers';
+import { gibsImagery, preloadGibsFrame } from '../gibs-layers';
 import { changeOMfileURL } from '../layers';
 import { updateUrl } from '../url';
 import {
@@ -55,7 +61,8 @@ import {
 	gibsBrowse,
 	gibsLayerId,
 	gibsResolvedDate,
-	setGibsDate
+	gibsResolvedTime,
+	setGibsFrame
 } from './gibs';
 import { metaJson, modelRun, time } from './time';
 import { selectedDomain } from './variables';
@@ -80,6 +87,8 @@ export const replayLoop = persisted<boolean>('replay-loop', true);
 export const replayPresetId = writable<string | undefined>(undefined);
 
 export const replayFrames = writable<ReplayFrame[]>([]);
+/** True when a time-aware satellite range exceeded the safe 5,000-frame ceiling. */
+export const replayFrameLimitExceeded = writable(false);
 export const replayIndex = writable(0);
 export const replayPlaying = writable(false);
 
@@ -96,39 +105,58 @@ export const replayPresetList = derived(
 		const validTimes = $metaJson?.valid_times ?? [];
 		return replayPresets({
 			latestDay: latestAvailableDay($availability.ranges),
+			latestTime: latestAvailableTime($availability.timeRanges),
 			coverageStart: layer?.coverageStart ?? $availability.ranges[0]?.start,
 			forecastStart: validTimes.length ? isoDayOf(new Date(validTimes[0])) : undefined,
+			temporalResolution: layer?.period,
 			today: isoDayOf(new Date())
 		});
 	}
 );
 
+/** A build result also reports when the fine-cadence guard rejected a range. */
+interface ReplayBuild {
+	frames: ReplayFrame[];
+	limitExceeded: boolean;
+}
+
 /** The frames the current range and cadence can actually show. */
-const buildFrames = (): ReplayFrame[] => {
+const buildFrames = (): ReplayBuild => {
 	const step = get(replayStep);
 	const from = get(replayFrom);
 	const to = get(replayTo);
 
 	if (get(replayMode) === 'forecast') {
 		const validTimes = (get(metaJson)?.valid_times ?? []).map((value) => new Date(value));
-		if (!validTimes.length) return [];
-		const start = from ?? isoDayOf(validTimes[0]);
-		const end = to ?? isoDayOf(validTimes[validTimes.length - 1]);
-		return forecastFrames(validTimes, start, end, isHourlyStep(step) ? step : step);
+		if (!validTimes.length) return { frames: [], limitExceeded: false };
+		const start = (from ?? isoDayOf(validTimes[0])).slice(0, 10);
+		const end = (to ?? isoDayOf(validTimes[validTimes.length - 1])).slice(0, 10);
+		return { frames: forecastFrames(validTimes, start, end, step), limitExceeded: false };
 	}
 
-	const { ranges } = get(gibsAvailability);
-	if (!ranges.length) return [];
+	const { ranges, timeRanges } = get(gibsAvailability);
+	if (!ranges.length) return { frames: [], limitExceeded: false };
 	const layer = gibsLayerById(get(gibsLayerId));
-	const start = from ?? ranges[0].start;
-	const end = to ?? latestAvailableDay(ranges) ?? ranges[ranges.length - 1].end;
-	return satelliteFrames(ranges, start, end, step, layer);
+	if (layer?.period === 'PT30M') {
+		if (!timeRanges.length) return { frames: [], limitExceeded: false };
+		const first = from ?? earliestAvailableTime(timeRanges);
+		const last = to ?? latestAvailableTime(timeRanges);
+		if (!first || !last) return { frames: [], limitExceeded: false };
+		const result = subdailyFrames(timeRanges, first, last, step);
+		return { frames: result.frames, limitExceeded: result.limitExceeded };
+	}
+
+	const start = (from ?? ranges[0].start).slice(0, 10);
+	const end = (to ?? latestAvailableDay(ranges) ?? ranges[ranges.length - 1].end).slice(0, 10);
+	return { frames: satelliteFrames(ranges, start, end, step, layer), limitExceeded: false };
 };
 
 /** Recompute the frame list; called whenever a frame source changes. */
 export const refreshReplayFrames = (): ReplayFrame[] => {
-	const frames = buildFrames();
+	const result = buildFrames();
+	const frames = result.frames;
 	replayFrames.set(frames);
+	replayFrameLimitExceeded.set(result.limitExceeded);
 	const index = get(replayIndex);
 	if (index >= frames.length) replayIndex.set(0);
 	return frames;
@@ -139,12 +167,17 @@ export const refreshReplayFrames = (): ReplayFrame[] => {
  * run is a forecast replay, anything older is the satellite archive. Without
  * the run loaded yet, the archive is the safe answer — it covers every day.
  */
-const modeForRange = (from: string | undefined, meta: { valid_times?: string[] } | undefined) => {
+const modeForRange = (
+	from: string | undefined,
+	meta: { valid_times?: string[] } | undefined,
+	layerId = get(gibsLayerId)
+): ReplayMode => {
+	// An exact UTC timestamp is a satellite time dimension, and must not be
+	// mistaken for forecast merely because its date overlaps the loaded run.
+	if (from?.includes('T') || gibsLayerById(layerId)?.period === 'PT30M') return 'satellite';
 	const first = meta?.valid_times?.[0];
-	if (!from || !first) return 'satellite' as ReplayMode;
-	return from >= isoDayOf(new Date(first))
-		? ('forecast' as ReplayMode)
-		: ('satellite' as ReplayMode);
+	if (!from || !first) return 'satellite';
+	return from.slice(0, 10) >= isoDayOf(new Date(first)) ? 'forecast' : 'satellite';
 };
 
 /** Mirror the range into the address bar, so a replay can be linked. */
@@ -182,11 +215,11 @@ const applyReplayFrame = async (index: number): Promise<void> => {
 	replayIndex.set(index);
 
 	if (get(replayMode) === 'satellite') {
-		// `setGibsDate` resolves the day against the layer's archive and moves the
-		// clock and the URL with it, so a paused replay always shows a real day.
-		setGibsDate(frame, false);
+		// The frame key is a UTC date or exact UTC timestamp; the owning GIBS
+		// store resolves gaps before the map and clock move to it.
+		setGibsFrame(frame, false);
 		const nextFrame = frames[index + 1] ?? (get(replayLoop) ? frames[0] : undefined);
-		preloadGibsDay(nextFrame);
+		preloadGibsFrame(nextFrame);
 		return;
 	}
 
@@ -209,9 +242,11 @@ const applyReplayFrame = async (index: number): Promise<void> => {
 const waitForFrameShown = (timeoutMs = 6000): Promise<'ready' | 'slow' | 'timeout'> => {
 	const settled = (): 'ready' | 'slow' | 'timeout' | undefined => {
 		if (get(replayMode) === 'forecast') return get(loading) ? undefined : 'ready';
-		const status = get(gibsImagery).status;
-		if (status === 'loading' || status === 'idle') return undefined;
-		return status === 'slow' ? 'slow' : 'ready';
+		const expected = get(replayFrames)[get(replayIndex)];
+		const imagery = get(gibsImagery);
+		if (imagery.frame !== expected || imagery.status === 'loading' || imagery.status === 'idle')
+			return undefined;
+		return imagery.status === 'slow' || imagery.status === 'error' ? 'slow' : 'ready';
 	};
 
 	const immediate = settled();
@@ -293,12 +328,13 @@ export const playReplay = async (): Promise<void> => {
 
 	const current =
 		get(replayMode) === 'satellite'
-			? get(gibsResolvedDate)
-			: formatISOWithoutTimezone(get(time)).slice(0, 15);
+			? (get(gibsResolvedTime) ?? get(gibsResolvedDate))
+			: formatISOWithoutTimezone(get(time));
 	replayIndex.set(frameIndexFor(frames, current));
 
 	replayPlaying.set(true);
 	await applyReplayFrame(get(replayIndex));
+	await waitForFrameShown();
 	if (get(replayPlaying)) schedule();
 };
 
@@ -331,8 +367,9 @@ export const setReplayRange = (range: {
 	mode?: ReplayMode;
 	presetId?: string;
 }): void => {
-	if (range.from !== undefined) replayFrom.set(range.from);
-	if (range.to !== undefined) replayTo.set(range.to);
+	pauseReplay();
+	if ('from' in range) replayFrom.set(range.from || undefined);
+	if ('to' in range) replayTo.set(range.to || undefined);
 	if (range.step) replayStep.set(range.step);
 	if (range.mode) replayMode.set(range.mode);
 	replayPresetId.set(range.presetId);
@@ -467,7 +504,7 @@ export const initReplayState = (): void => {
 		if (to) replayTo.set(to);
 		if (step) replayStep.set(step);
 		// A range that reaches past the forecast window is the satellite archive.
-		replayMode.set(modeForRange(from, get(metaJson)));
+		replayMode.set(modeForRange(from, get(metaJson), get(gibsLayerId)));
 		refreshReplayFrames();
 	}
 
@@ -479,7 +516,7 @@ export const initReplayState = (): void => {
 		const frames = get(replayFrames);
 		if (frames.length < 2) return;
 		const next = frames[get(replayIndex) + 1] ?? (get(replayLoop) ? frames[0] : undefined);
-		preloadGibsDay(next);
+		preloadGibsFrame(next);
 	});
 
 	gibsAvailability.subscribe(() => {
@@ -500,7 +537,8 @@ export const initReplayState = (): void => {
 		// A range typed by hand can now be told apart: inside the loaded run it is
 		// a forecast replay, older than the run it is the satellite archive. A
 		// preset already knows its own mode.
-		if (!get(replayPresetId)) replayMode.set(modeForRange(get(replayFrom), get(metaJson)));
+		if (!get(replayPresetId))
+			replayMode.set(modeForRange(get(replayFrom), get(metaJson), get(gibsLayerId)));
 		refreshReplayFrames();
 	});
 	replayStep.subscribe(() => {

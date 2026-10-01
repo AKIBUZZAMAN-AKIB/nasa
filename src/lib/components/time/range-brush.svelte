@@ -47,7 +47,11 @@
 		shiftIsoDay(min, Math.round(Math.min(1, Math.max(0, fraction)) * span));
 
 	const positionOf = (day?: string): number =>
-		day ? Math.min(1, Math.max(0, isoDayDiff(min, day) / span)) : 0;
+		day ? Math.min(1, Math.max(0, isoDayDiff(min, day.slice(0, 10)) / span)) : 0;
+
+	/** Dragging a day-wide rail keeps an exact UTC time bound, when one exists. */
+	const atSameTime = (day: string, bound?: string): string =>
+		bound?.includes('T') ? `${day}${bound.slice(10)}` : day;
 
 	const fromPosition = $derived(positionOf(from));
 	const toPosition = $derived(positionOf(to));
@@ -92,12 +96,14 @@
 		if (drag === 'band') {
 			// Move both edges together, keeping the width and the archive bounds.
 			const start = Math.min(1 - bandWidth, Math.max(0, fraction - dragOffset));
-			onchange(dayAt(start), dayAt(start + bandWidth));
+			onchange(atSameTime(dayAt(start), from), atSameTime(dayAt(start + bandWidth), to));
 			return;
 		}
 		const day = dayAt(fraction);
-		if (drag === 'from') onchange(day > to! ? to! : day, to!);
-		else onchange(from!, day < from! ? from! : day);
+		const fromDay = from!.slice(0, 10);
+		const toDay = to!.slice(0, 10);
+		if (drag === 'from') onchange(atSameTime(day > toDay ? toDay : day, from), to!);
+		else onchange(from!, atSameTime(day < fromDay ? fromDay : day, to));
 	};
 
 	const endDrag = (): void => {
@@ -119,11 +125,13 @@
 		event.preventDefault();
 		const step = event.shiftKey ? 7 : 1;
 		if (what === 'from') {
-			const next = shiftIsoDay(from!, delta * step);
-			onchange(next > to! ? to! : next < min ? min : next, to!);
+			const next = shiftIsoDay(from!.slice(0, 10), delta * step);
+			const clamped = next > to!.slice(0, 10) ? to!.slice(0, 10) : next < min ? min : next;
+			onchange(atSameTime(clamped, from), to!);
 		} else {
-			const next = shiftIsoDay(to!, delta * step);
-			onchange(from!, next < from! ? from! : next > max ? max : next);
+			const next = shiftIsoDay(to!.slice(0, 10), delta * step);
+			const clamped = next < from!.slice(0, 10) ? from!.slice(0, 10) : next > max ? max : next;
+			onchange(from!, atSameTime(clamped, to));
 		}
 	};
 </script>

@@ -77,6 +77,22 @@ export const GIBS_DATASETS: Record<string, GibsDatasetRecord[]> = {
 			type: 'NRT'
 		}
 	],
+	IMERG_Precipitation_Rate_30min: [
+		{
+			shortName: 'GPM_3IMERGHH',
+			version: '07',
+			cmrId: 'C2723754847-GES_DISC',
+			center: 'GES_DISC',
+			type: 'STD'
+		},
+		{
+			shortName: 'GPM_3IMERGHHE',
+			version: '07',
+			cmrId: 'C2723758340-GES_DISC',
+			center: 'GES_DISC',
+			type: 'NRT'
+		}
+	],
 	MERRA2_2m_Air_Temperature_Monthly: [
 		{
 			shortName: 'M2TMNXSLV',

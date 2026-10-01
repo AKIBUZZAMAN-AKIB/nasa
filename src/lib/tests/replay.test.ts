@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
 	GIBS_LAYERS,
 	type GibsAvailabilityRange,
+	type GibsTimeRange,
 	gibsLayerById,
 	resolveAvailableDay
 } from '$lib/gibs';
 import {
+	MAX_SUBDAILY_REPLAY_FRAMES,
 	type ReplayStep,
 	forecastFrames,
+	formatReplayDay,
 	frameIndexFor,
 	isDayInRanges,
 	parseReplayUrl,
@@ -18,6 +21,7 @@ import {
 	satelliteFrames,
 	stepLabel,
 	stepsForLayer,
+	subdailyFrames,
 	warmupRange
 } from '$lib/replay';
 
@@ -33,6 +37,12 @@ const DAILY: GibsAvailabilityRange[] = [
 	range('2024-05-01', '2024-05-04'),
 	range('2024-05-06', '2024-05-10')
 ];
+
+const timeRange = (start: string, end: string): GibsTimeRange => ({
+	start,
+	end,
+	stepMs: 30 * 60 * 1000
+});
 
 describe('replayStepDef', () => {
 	it('knows the cadence of every step', () => {
@@ -109,6 +119,7 @@ describe('satelliteFrames', () => {
 	it('returns nothing for an empty archive or a backwards range', () => {
 		expect(satelliteFrames([], '2024-05-01', '2024-05-10', '1d')).toEqual([]);
 		expect(satelliteFrames(DAILY, '2024-05-10', '2024-05-01', '1d')).toEqual([]);
+		expect(satelliteFrames(DAILY, '2024-05-01', '2024-05-10', '30m')).toEqual([]);
 	});
 
 	it('ends where the range ends, even on a coarse monthly walk', () => {
@@ -120,6 +131,77 @@ describe('satelliteFrames', () => {
 		expect(frames[frames.length - 1]).toBe('2020-01-05');
 		for (const frame of frames) expect(frame <= '2020-01-05').toBe(true);
 		expect(frames.length).toBeGreaterThan(12);
+	});
+});
+
+describe('subdailyFrames', () => {
+	const fragmented = [
+		timeRange('2024-05-01T00:00:00Z', '2024-05-01T02:00:00Z'),
+		timeRange('2024-05-01T03:00:00Z', '2024-05-01T04:00:00Z')
+	];
+
+	it('emits only exact published frames and leaves archive gaps empty', () => {
+		const result = subdailyFrames(
+			fragmented,
+			'2024-05-01T00:00:00Z',
+			'2024-05-01T04:00:00Z',
+			'30m'
+		);
+		expect(result.limitExceeded).toBe(false);
+		expect(result.frames).toEqual([
+			'2024-05-01T00:00:00Z',
+			'2024-05-01T00:30:00Z',
+			'2024-05-01T01:00:00Z',
+			'2024-05-01T01:30:00Z',
+			'2024-05-01T02:00:00Z',
+			'2024-05-01T03:00:00Z',
+			'2024-05-01T03:30:00Z',
+			'2024-05-01T04:00:00Z'
+		]);
+		expect(result.frames).not.toContain('2024-05-01T02:30:00Z');
+		expect(new Set(result.frames).size).toBe(result.frames.length);
+	});
+
+	it('samples an hourly cadence without asking GIBS for off-grid timestamps', () => {
+		const result = subdailyFrames(fragmented, '2024-05-01T00:00:00Z', '2024-05-01T04:00:00Z', '1h');
+		expect(result.frames).toEqual([
+			'2024-05-01T00:00:00Z',
+			'2024-05-01T01:00:00Z',
+			'2024-05-01T02:00:00Z',
+			'2024-05-01T03:00:00Z',
+			'2024-05-01T04:00:00Z'
+		]);
+	});
+
+	it('does not append an off-cadence end frame', () => {
+		const result = subdailyFrames(
+			[timeRange('2024-05-01T00:00:00Z', '2024-05-01T05:00:00Z')],
+			'2024-05-01T00:00:00Z',
+			'2024-05-01T04:30:00Z',
+			'1h'
+		);
+		expect(result.frames.at(-1)).toBe('2024-05-01T04:00:00Z');
+	});
+
+	it('treats date-only endpoints as inclusive UTC days', () => {
+		const oneDay = [timeRange('2024-05-01T00:00:00Z', '2024-05-01T23:30:00Z')];
+		const result = subdailyFrames(oneDay, '2024-05-01', '2024-05-01', '30m');
+		expect(result.frames).toHaveLength(48);
+		expect(result.frames[0]).toBe('2024-05-01T00:00:00Z');
+		expect(result.frames.at(-1)).toBe('2024-05-01T23:30:00Z');
+	});
+
+	it('rejects impossible ranges and guards a giant 30-minute request', () => {
+		expect(subdailyFrames(fragmented, 'not-a-time', '2024-05-01', '30m')).toEqual({
+			frames: [],
+			limitExceeded: false
+		});
+		const start = '2000-01-01T00:00:00Z';
+		const end = new Date(Date.parse(start) + (MAX_SUBDAILY_REPLAY_FRAMES + 1) * 30 * 60 * 1000)
+			.toISOString()
+			.replace('.000Z', 'Z');
+		const result = subdailyFrames([timeRange(start, end)], start, end, '30m');
+		expect(result).toEqual({ frames: [], limitExceeded: true });
 	});
 });
 
@@ -171,6 +253,14 @@ describe('frameIndexFor', () => {
 		expect(frameIndexFor(frames, '2024-05-03T1200')).toBe(2);
 	});
 
+	it('uses the exact clock time for sub-daily frames', () => {
+		const times = ['2024-05-01T00:00:00Z', '2024-05-01T00:30:00Z', '2024-05-01T01:00:00Z'];
+		expect(frameIndexFor(times, '2024-05-01T00:40:00Z')).toBe(1);
+		expect(frameIndexFor(times, '2024-05-01T00:50:00Z')).toBe(2);
+		expect(formatReplayDay('2024-05-01T00:30:00Z')).toBe('1 May 2024 00:30 UTC');
+		expect(formatReplayDay('2024-05-01')).toBe('1 May 2024');
+	});
+
 	it('falls back to the last frame when nothing is known', () => {
 		expect(frameIndexFor(frames, undefined)).toBe(3);
 		expect(frameIndexFor([], '2024-05-01')).toBe(0);
@@ -208,6 +298,30 @@ describe('replayPresets', () => {
 			to: '2026-09-28',
 			step: '1d'
 		});
+	});
+
+	it('offers time-aware presets for the PT30M IMERG archive', () => {
+		const times = replayPresets({
+			latestDay: '2026-09-30',
+			latestTime: '2026-09-30T23:30:00Z',
+			coverageStart: '1998-01-01',
+			temporalResolution: 'PT30M',
+			today: '2026-10-01'
+		});
+		const getPreset = (id: string) => times.find((preset) => preset.id === id)!;
+		expect(getPreset('satellite-week')).toMatchObject({
+			from: '2026-09-23T23:30:00Z',
+			to: '2026-09-30T23:30:00Z',
+			step: '1h'
+		});
+		expect(getPreset('satellite-month')).toMatchObject({
+			from: '2026-09-01T23:30:00Z',
+			step: '6h'
+		});
+		expect(getPreset('satellite-24h').step).toBe('30m');
+		expect(getPreset('satellite-monsoon').from).toBe('2026-06-01T23:30:00Z');
+		expect(getPreset('satellite-year').from).toBe('2026-01-01T23:30:00Z');
+		expect(getPreset('satellite-all').from).toBe('1998-01-01T23:30:00Z');
 	});
 
 	it('falls back to last year’s monsoon when this year’s has not started', () => {
@@ -264,6 +378,20 @@ describe('replay URL round trip', () => {
 			from: '2024-01-01',
 			to: '2024-02-01',
 			step: '7d'
+		});
+	});
+
+	it('round-trips exact UTC timestamps without turning them into day-only bounds', () => {
+		const params = replayUrlParams({
+			open: true,
+			from: '2024-05-01T00:30:00Z',
+			to: '2024-05-02T23:30:00Z',
+			step: '1h'
+		});
+		expect(parseReplayUrl(`?${new URLSearchParams(params)}`)).toEqual({
+			from: '2024-05-01T00:30:00Z',
+			to: '2024-05-02T23:30:00Z',
+			step: '1h'
 		});
 	});
 

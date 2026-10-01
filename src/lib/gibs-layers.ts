@@ -14,7 +14,7 @@
  * So the imagery lives on two layers — one shown, one hidden at zero opacity
  * (still visible to MapLibre, so its tiles load) — and a frame change fetches
  * into the hidden layer and cross-fades once its tiles are in. During replay
- * the hidden layer is already holding the *following* day, so most frames
+ * the hidden layer is already holding the *following* frame, so most frames
  * appear without a wait at all.
  *
  * The imagery is inserted above the basemap and below the weather rasters, and
@@ -25,7 +25,13 @@ import { type Unsubscriber, get, writable } from 'svelte/store';
 
 import { toast } from 'svelte-sonner';
 
-import { gibsBrowse, gibsLayerId, gibsOpacity, gibsResolvedDate } from '$lib/stores/gibs';
+import {
+	gibsBrowse,
+	gibsLayerId,
+	gibsOpacity,
+	gibsResolvedDate,
+	gibsResolvedTime
+} from '$lib/stores/gibs';
 import { map as mapStore } from '$lib/stores/map';
 import { preferences } from '$lib/stores/preferences';
 
@@ -44,8 +50,8 @@ const FADE_MS = 180;
 
 export interface GibsImageryState {
 	status: 'idle' | 'loading' | 'ready' | 'slow' | 'error';
-	/** Day currently on screen (the one that is really drawn). */
-	day?: string;
+	/** Exact date or timestamp currently on screen (the one really drawn). */
+	frame?: string;
 }
 
 /** Whether the frame on screen is in: lets the replay bar show a buffer chip. */
@@ -54,8 +60,8 @@ export const gibsImagery = writable<GibsImageryState>({ status: 'idle' });
 interface Slot {
 	sourceId: string;
 	layerId: string;
-	/** Day the slot's tiles point at. */
-	day?: string;
+	/** Exact date or timestamp the slot's tiles point at. */
+	frame?: string;
 	/** Catalogue entry the slot was built for (its zoom limit differs). */
 	forLayerId?: string;
 	awaitingRender: boolean;
@@ -120,7 +126,7 @@ const removeSlot = (slot: Slot): void => {
 	} catch {
 		// A concurrent style reload may have removed them already.
 	}
-	slot.day = undefined;
+	slot.frame = undefined;
 	slot.forLayerId = undefined;
 	slot.awaitingRender = false;
 	slot.errored = false;
@@ -133,19 +139,23 @@ const removeAll = (): void => {
 };
 
 /**
- * Point a slot at a day, adding its source and layer when they are missing.
+ * Point a slot at an exact frame, adding its source and layer when missing.
  * The slot is left visible at zero opacity: MapLibre only fetches tiles for
  * layers that are visible, so a hidden slot has to be "visible but clear" to
  * preload into.
  */
-const retarget = (slot: Slot, layer: GibsLayerDef, day: string): void => {
+const retarget = (slot: Slot, layer: GibsLayerDef, frame: string): void => {
 	if (!map) return;
-	const url = gibsTileUrl(layer, day);
+	const url = gibsTileUrl(layer, frame);
 	const source = map.getSource(slot.sourceId) as maplibregl.RasterTileSource | undefined;
 
 	if (source && slot.forLayerId === layer.id) {
 		source.setTiles([url]);
 		map.setLayoutProperty(slot.layerId, 'visibility', 'visible');
+		// `setTiles` reuses the source and layer, so keep the slot's identity in
+		// sync with the new URL. Replay's ready check depends on this exact key.
+		slot.frame = frame;
+		slot.errored = false;
 		return;
 	}
 
@@ -178,7 +188,7 @@ const retarget = (slot: Slot, layer: GibsLayerDef, day: string): void => {
 		},
 		anchorLayer()
 	);
-	slot.day = day;
+	slot.frame = frame;
 	slot.forLayerId = layer.id;
 	slot.awaitingRender = false;
 	slot.errored = false;
@@ -201,7 +211,7 @@ const isSlotLoaded = (slot: Slot): boolean => {
 
 /**
  * Resolve when the slot's tiles are in, or when the wait ran out: a slow server
- * must not stall the replay, and a half-loaded frame is still that day's frame.
+ * must not stall the replay, and a half-loaded image is still the requested frame.
  */
 const waitForSlot = (slot: Slot, timeoutMs = FRAME_TIMEOUT_MS): Promise<boolean> => {
 	if (!map) return Promise.resolve(false);
@@ -247,7 +257,7 @@ const swap = (slot: Slot): void => {
 	const previous = from;
 	visibleIndex = visibleIndex === 0 ? 1 : 0;
 	slot.busy = false;
-	gibsImagery.set({ status: 'ready', day: slot.day });
+	gibsImagery.set({ status: 'ready', frame: slot.frame });
 
 	setTimeout(() => {
 		// Still not the visible one (a newer frame came in meanwhile): leave it.
@@ -256,7 +266,7 @@ const swap = (slot: Slot): void => {
 	}, FADE_MS + 40);
 };
 
-/** Hide both slots (imagery off, or no day to draw). */
+/** Hide both slots (imagery off, or no frame to draw). */
 const hideAll = (): void => {
 	if (!map) return;
 	for (const slot of slots) {
@@ -269,8 +279,8 @@ const hideAll = (): void => {
 };
 
 /**
- * Follow the stores: keep the visible frame equal to the resolved day, fetch a
- * changed day into the hidden slot first, and cross-fade when it is in.
+ * Follow the stores: keep the visible frame equal to the resolved timestamp,
+ * fetch a changed frame into the hidden slot first, and cross-fade when it is in.
  */
 const pump = async (): Promise<void> => {
 	if (!map || !map.isStyleLoaded()) return;
@@ -282,28 +292,28 @@ const pump = async (): Promise<void> => {
 	try {
 		for (;;) {
 			const layer = gibsLayerById(get(gibsLayerId));
-			const day = get(gibsResolvedDate);
+			const frame = get(gibsResolvedTime) ?? get(gibsResolvedDate);
 			const browsing = get(gibsBrowse);
 
-			if (!browsing || !layer || !day) {
+			if (!browsing || !layer || !frame) {
 				hideAll();
 				return;
 			}
 
-			if (visible().day === day && visible().forLayerId === layer.id) {
+			if (visible().frame === frame && visible().forLayerId === layer.id) {
 				map.setPaintProperty(visible().layerId, 'raster-opacity', targetOpacity());
 				map.moveLayer(visible().layerId, anchorLayer());
-				gibsImagery.set({ status: 'ready', day });
+				gibsImagery.set({ status: 'ready', frame });
 				return;
 			}
 
 			const target = hidden();
-			if (target.day !== day || target.forLayerId !== layer.id) {
-				gibsImagery.set({ status: 'loading', day });
+			if (target.frame !== frame || target.forLayerId !== layer.id || target.errored) {
+				gibsImagery.set({ status: 'loading', frame });
 				// Claimed before the fetch: a preload arriving meanwhile must not
-				// retarget the slot out from under this frame.
+				// retarget the slot out from under this exact frame.
 				target.busy = true;
-				retarget(target, layer, day);
+				retarget(target, layer, frame);
 			} else {
 				target.busy = true;
 			}
@@ -313,7 +323,7 @@ const pump = async (): Promise<void> => {
 
 			// A newer request landed while this frame was loading: start over.
 			if (
-				get(gibsResolvedDate) !== day ||
+				(get(gibsResolvedTime) ?? get(gibsResolvedDate)) !== frame ||
 				gibsLayerById(get(gibsLayerId))?.id !== layer.id ||
 				!get(gibsBrowse)
 			) {
@@ -321,7 +331,7 @@ const pump = async (): Promise<void> => {
 			}
 
 			swap(target);
-			if (!loaded) gibsImagery.set({ status: 'slow', day });
+			if (!loaded) gibsImagery.set({ status: 'slow', frame });
 			return;
 		}
 	} catch {
@@ -337,25 +347,28 @@ const pump = async (): Promise<void> => {
 };
 
 /**
- * Fetch a day into the hidden slot before it is needed — what makes a replay
+ * Fetch a frame into the hidden slot before it is needed — what makes a replay
  * look smooth: by the time the frame comes up, its tiles are usually already
  * decoded.
  */
-export const preloadGibsDay = (day: string | undefined): void => {
-	if (!map || !day || !get(gibsBrowse)) return;
+export const preloadGibsFrame = (frame: string | undefined): void => {
+	if (!map || !frame || !get(gibsBrowse)) return;
 	const layer = gibsLayerById(get(gibsLayerId));
 	if (!layer) return;
 	const slot = hidden();
-	if (slot.day === day && slot.forLayerId === layer.id) return;
+	if (slot.frame === frame && slot.forLayerId === layer.id) return;
 	// Never disturb the slot the pump is filling, or one that is becoming visible.
 	if (slot.busy || slot.awaitingRender) return;
-	retarget(slot, layer, day);
+	retarget(slot, layer, frame);
 };
+
+/** Backwards-compatible date-named alias for existing controls. */
+export const preloadGibsDay = preloadGibsFrame;
 
 /** Basemap style reloads wipe every overlay: rebuild from the stores. */
 const onStyleLoad = (): void => {
-	slots[0].day = undefined;
-	slots[1].day = undefined;
+	slots[0].frame = undefined;
+	slots[1].frame = undefined;
 	gibsImagery.set({ status: 'idle' });
 	void pump();
 };
@@ -370,10 +383,14 @@ const onMapError = (event: maplibregl.ErrorEvent & { sourceId?: string }): void 
 		return;
 	const slot = slots.find((entry) => entry.sourceId === event.sourceId);
 	if (slot) slot.errored = true;
-	gibsImagery.set({ status: 'error', day: get(gibsResolvedDate) });
-	toast.error('No satellite imagery for this date', {
+	const requestedFrame = get(gibsResolvedTime) ?? get(gibsResolvedDate);
+	// A preloaded next frame can fail while a different image is on screen.
+	// Keep its error on the slot; don't report it as a failure of the visible frame.
+	if (!slot || slot.frame !== requestedFrame) return;
+	gibsImagery.set({ status: 'error', frame: requestedFrame });
+	toast.error('No satellite imagery for this frame', {
 		id: 'gibs-tile-error',
-		description: 'GIBS has a gap here — step to another day or use “Latest”.'
+		description: 'GIBS has a gap here — step to another frame or use “Latest”.'
 	});
 };
 
@@ -388,9 +405,10 @@ export const initGibsLayers = (): void => {
 	unsubscribers = [
 		gibsLayerId.subscribe(() => void pump()),
 		gibsResolvedDate.subscribe(() => void pump()),
+		gibsResolvedTime.subscribe(() => void pump()),
 		gibsBrowse.subscribe(() => void pump()),
 		gibsOpacity.subscribe(() => {
-			if (map?.getLayer(visible().layerId) && visible().day !== undefined) {
+			if (map?.getLayer(visible().layerId) && visible().frame !== undefined) {
 				map.setPaintProperty(visible().layerId, 'raster-opacity', targetOpacity());
 			}
 		}),

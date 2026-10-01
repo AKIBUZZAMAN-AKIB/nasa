@@ -5,23 +5,32 @@ import {
 	GIBS_LAYERS,
 	GIBS_URL_DATE_PARAM,
 	GIBS_URL_LAYER_PARAM,
+	GIBS_URL_TIME_PARAM,
 	type GibsAvailabilityRange,
+	type GibsTimeRange,
 	describeCoverage,
 	formatGibsDay,
+	formatGibsTimestamp,
 	gibsLayerById,
 	gibsLayersByCategory,
 	gibsRibbonFraction,
 	gibsRibbonSegments,
 	gibsTileUrl,
+	gibsTimeRangesToDayRanges,
 	gibsUrlParams,
 	gibsWorldviewUrl,
 	isoDayAtNoon,
 	isoDayDiff,
 	isoDayOf,
 	latestAvailableDay,
+	latestAvailableTime,
+	normalizeGibsTimestamp,
 	parseGibsAvailability,
+	parseGibsTimeAvailability,
 	parseGibsUrl,
 	resolveAvailableDay,
+	resolveAvailableTime,
+	shiftGibsTimestamp,
 	shiftIsoDay,
 	snapToPeriod
 } from '$lib/gibs';
@@ -76,6 +85,66 @@ describe('parseGibsAvailability', () => {
 			'<Domains><Domain>2020-01-01/2020-02-01/P1D,2010-01-01/2010-02-01/P1D</Domain></Domains>'
 		);
 		expect(ranges.map((r) => r.start)).toEqual(['2010-01-01', '2020-01-01']);
+	});
+});
+
+describe('parseGibsTimeAvailability', () => {
+	it('expands date-bounded PT30M ranges to the exact UTC frames in each day', () => {
+		const ranges = parseGibsTimeAvailability(
+			'<Domains><DimensionDomain><Domain>2024-05-01/2024-05-03/PT30M</Domain></DimensionDomain></Domains>'
+		);
+		expect(ranges).toEqual([
+			{
+				start: '2024-05-01T00:00:00Z',
+				end: '2024-05-03T23:30:00Z',
+				stepMs: 1_800_000
+			}
+		]);
+	});
+
+	it('keeps fragmented exact-time domains compact and projects their covered days', () => {
+		const ranges = parseGibsTimeAvailability(
+			'<Domains><DimensionDomain><Domain>2024-05-01T00:00:00Z/2024-05-01T01:30:00Z/PT30M,2024-05-03T23:00:00Z/2024-05-03T23:30:00Z/PT30M</Domain></DimensionDomain></Domains>'
+		);
+		expect(ranges).toHaveLength(2);
+		expect(gibsTimeRangesToDayRanges(ranges)).toEqual([
+			{ start: '2024-05-01', end: '2024-05-01', stepDays: 1, step: 'P1D' },
+			{ start: '2024-05-03', end: '2024-05-03', stepDays: 1, step: 'P1D' }
+		]);
+		expect(latestAvailableTime(ranges)).toBe('2024-05-03T23:30:00Z');
+	});
+
+	it('ignores invalid ranges instead of inventing a cadence', () => {
+		expect(parseGibsTimeAvailability('<Domains><Domain>bad</Domain></Domains>')).toEqual([]);
+		expect(
+			parseGibsTimeAvailability(
+				'<Domains><Domain>2024-05-01T00:00:00Z/2024-05-02T00:00:00Z/P1D</Domain></Domains>'
+			)
+		).toEqual([]);
+	});
+});
+
+describe('exact GIBS timestamp helpers', () => {
+	const ranges: GibsTimeRange[] = [
+		{ start: '2024-05-01T00:00:00Z', end: '2024-05-01T01:00:00Z', stepMs: 1_800_000 },
+		{ start: '2024-05-01T02:00:00Z', end: '2024-05-01T02:30:00Z', stepMs: 1_800_000 }
+	];
+
+	it('normalizes only real UTC dates and timestamps', () => {
+		expect(normalizeGibsTimestamp('2024-05-01')).toBe('2024-05-01T00:00:00Z');
+		expect(normalizeGibsTimestamp('2024-05-01T00:30Z')).toBe('2024-05-01T00:30:00Z');
+		expect(normalizeGibsTimestamp('2024-02-30T00:30:00Z')).toBeUndefined();
+		expect(normalizeGibsTimestamp('2024-05-01T00:30')).toBeUndefined();
+	});
+
+	it('resolves to an actual frame (ties choose the earlier, not an off-grid time)', () => {
+		expect(resolveAvailableTime(ranges, '2024-05-01T00:45:00Z')).toBe('2024-05-01T00:30:00Z');
+		expect(resolveAvailableTime(ranges, '2024-05-01T01:45:00Z')).toBe('2024-05-01T02:00:00Z');
+	});
+
+	it('shifts in UTC and formats the frame with an explicit UTC label', () => {
+		expect(shiftGibsTimestamp('2024-05-01T23:30:00Z', 30)).toBe('2024-05-02T00:00:00Z');
+		expect(formatGibsTimestamp('2024-05-01T00:30:00Z')).toBe('Wed, 1 May 2024 00:30 UTC');
 	});
 });
 
@@ -186,10 +255,12 @@ describe('the catalogue itself', () => {
 			expect(layer.tileMatrixSet).toMatch(/^GoogleMapsCompatible_Level\d+$/);
 			expect(layer.coverageStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 			expect(['png', 'jpg']).toContain(layer.extension);
-			expect(['P1D', 'P16D', 'P1M']).toContain(layer.period);
+			expect(['P1D', 'P16D', 'P1M', 'PT30M']).toContain(layer.period);
 			if (layer.legend)
 				expect(layer.legend.startsWith('https://gibs.earthdata.nasa.gov/')).toBe(true);
 		}
+		expect(gibsLayerById('IMERG_Precipitation_Rate')?.coverageStart).toBe('2000-06-01');
+		expect(gibsLayerById('IMERG_Precipitation_Rate_30min')?.coverageStart).toBe('1998-01-01');
 	});
 
 	it('groups every layer into a non-empty category', () => {
@@ -350,7 +421,30 @@ describe('shared links', () => {
 		const search = `?${new URLSearchParams(params).toString()}`;
 		expect(parseGibsUrl(search)).toEqual({
 			layerId: 'AIRS_L2_Surface_Air_Temperature_Day',
-			day
+			day,
+			timestamp: undefined
+		});
+	});
+
+	it('round-trips an exact non-latest UTC frame in a shared link', () => {
+		const timestamp = '2026-09-30T12:30:00Z';
+		const params = gibsUrlParams({
+			browsing: true,
+			layerId: 'IMERG_Precipitation_Rate_30min',
+			day: timestamp.slice(0, 10),
+			latest: '2026-09-30',
+			timestamp,
+			latestTimestamp: '2026-09-30T23:30:00Z',
+			defaultLayerId
+		});
+		expect(params).toMatchObject({
+			[GIBS_URL_LAYER_PARAM]: 'IMERG_Precipitation_Rate_30min',
+			[GIBS_URL_TIME_PARAM]: timestamp
+		});
+		expect(parseGibsUrl(`?${new URLSearchParams(params)}`)).toEqual({
+			layerId: 'IMERG_Precipitation_Rate_30min',
+			day: '2026-09-30',
+			timestamp
 		});
 	});
 
@@ -368,13 +462,22 @@ describe('shared links', () => {
 	});
 
 	it('ignores unknown layers and impossible days instead of failing', () => {
-		expect(parseGibsUrl('')).toEqual({ layerId: undefined, day: undefined });
-		expect(parseGibsUrl('?gibs=Not_A_Layer')).toEqual({ layerId: undefined, day: undefined });
+		expect(parseGibsUrl('')).toEqual({ layerId: undefined, day: undefined, timestamp: undefined });
+		expect(parseGibsUrl('?gibs=Not_A_Layer')).toEqual({
+			layerId: undefined,
+			day: undefined,
+			timestamp: undefined
+		});
 		// 2011-02-30 has the right shape but is not a real day.
-		expect(parseGibsUrl('?gibs-date=2011-02-30')).toEqual({ layerId: undefined, day: undefined });
+		expect(parseGibsUrl('?gibs-date=2011-02-30')).toEqual({
+			layerId: undefined,
+			day: undefined,
+			timestamp: undefined
+		});
 		expect(parseGibsUrl('?gibs-date=1999-01-01')).toEqual({
 			layerId: undefined,
-			day: '1999-01-01'
+			day: '1999-01-01',
+			timestamp: undefined
 		});
 	});
 });

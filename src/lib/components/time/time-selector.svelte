@@ -11,6 +11,7 @@
 		enterGibsBrowse,
 		exitGibsBrowse,
 		gibsBrowse,
+		gibsLayerId,
 		goToLatestGibs,
 		shiftGibsDate
 	} from '$lib/stores/gibs';
@@ -32,7 +33,7 @@
 		MILLISECONDS_PER_HOUR,
 		MILLISECONDS_PER_WEEK
 	} from '$lib/constants';
-	import { isoDayOf } from '$lib/gibs';
+	import { gibsLayerById, isoDayOf } from '$lib/gibs';
 	import { throttle } from '$lib/helpers';
 	import { changeOMfileURL } from '$lib/layers';
 	import { tryGetMetaData } from '$lib/metadata';
@@ -54,6 +55,7 @@
 	// Disables time selection when loading new OM files. Satellite browsing has
 	// no model run to wait for, so the control stays live there.
 	let disabled = $derived($modelRun === undefined && !$gibsBrowse);
+	const subdailyGibs = $derived($gibsBrowse && gibsLayerById($gibsLayerId)?.period === 'PT30M');
 	// Tracks the currently selected date for display and navigation
 	let currentDate = $state(new Date($time));
 
@@ -387,9 +389,8 @@
 		}
 	};
 
-	// The same chevrons and keys work in both modes: in the forecast they move
-	// by hours, in the satellite archive by whole days (or the layer's own
-	// cadence, for a 16-day or monthly composite).
+	// The same chevrons and keys work in both modes: forecast steps stay native;
+	// satellite steps follow the layer's cadence (including 30-minute IMERG).
 	const stepBack = () => {
 		if ($gibsBrowse) shiftGibsDate(-1);
 		else previousHour();
@@ -1055,8 +1056,16 @@
 					? 'cursor-not-allowed'
 					: 'cursor-pointer'} "
 				onclick={stepBack}
-				aria-label={$gibsBrowse ? 'Previous day' : 'Previous Hour'}
-				title={$gibsBrowse ? 'Earlier satellite day' : 'Previous hour'}
+				aria-label={$gibsBrowse
+					? subdailyGibs
+						? 'Previous frame'
+						: 'Previous day'
+					: 'Previous hour'}
+				title={$gibsBrowse
+					? subdailyGibs
+						? 'Earlier satellite frame'
+						: 'Earlier satellite day'
+					: 'Previous hour'}
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
@@ -1088,8 +1097,12 @@
 					? '-right-7 h-12.5'
 					: 'right-0 w-12 h-full'} {disabled ? 'cursor-not-allowed' : 'cursor-pointer'} "
 				onclick={stepForward}
-				aria-label={$gibsBrowse ? 'Next day' : 'Next Hour'}
-				title={$gibsBrowse ? 'Later satellite day' : 'Next hour'}
+				aria-label={$gibsBrowse ? (subdailyGibs ? 'Next frame' : 'Next day') : 'Next hour'}
+				title={$gibsBrowse
+					? subdailyGibs
+						? 'Later satellite frame'
+						: 'Later satellite day'
+					: 'Next hour'}
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
