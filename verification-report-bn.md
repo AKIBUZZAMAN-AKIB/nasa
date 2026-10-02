@@ -13,31 +13,31 @@ Standalone Maps HTML পুনর্নির্মাণ করে Chromium-এ
 
 ## যাচাইয়ের ফল
 
-| ক্ষেত্র | ফল |
-| --- | --- |
-| `npm run check` | সফল; ০ error, ০ warning |
-| `npm test -- --run` | ১২টি test file-এ ২৪৯টি test পাস |
-| `npm run lint` | সফল |
-| `npm run build:onefile` | সফল; HTML প্রায় ৫.৬৭ MiB, gzip প্রায় ১.১১ MiB |
-| Standalone browser run | HTTP ২০০; COOP/COEP-সহ `crossOriginIsolated: true` |
-| Basemap | Open-Meteo style-এর প্রয়োজনীয় layer OpenFreeMap vector tiles দিয়ে এসেছে; attribution দৃশ্যমান |
-| CORS | পরীক্ষিত OpenFreeMap tile, Open-Meteo historical API এবং NASA GIBS response-এ wildcard CORS header দেখা গেছে |
-| Historical data | Dhaka ERA5 ও GFS এবং Europe-এর CERRA live data দিয়ে যাচাই |
-| Satellite | NASA GIBS metadata/imagery tile HTTP ২০০; কোনো console error বা failed request রেকর্ড হয়নি |
+| ক্ষেত্র                 | ফল                                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `npm run check`         | সফল; ০ error, ০ warning                                                                                      |
+| `npm test -- --run`     | ১২টি test file-এ ২৪৯টি test পাস                                                                              |
+| `npm run lint`          | সফল                                                                                                          |
+| `npm run build:onefile` | সফল; HTML প্রায় ৫.৬৭ MiB, gzip প্রায় ১.১১ MiB                                                                |
+| Standalone browser run  | HTTP ২০০; COOP/COEP-সহ `crossOriginIsolated: true`                                                           |
+| Basemap                 | Open-Meteo style-এর প্রয়োজনীয় layer OpenFreeMap vector tiles দিয়ে এসেছে; attribution দৃশ্যমান                |
+| CORS                    | পরীক্ষিত OpenFreeMap tile, Open-Meteo historical API এবং NASA GIBS response-এ wildcard CORS header দেখা গেছে |
+| Historical data         | Dhaka ERA5 ও GFS এবং Europe-এর CERRA live data দিয়ে যাচাই                                                    |
+| Satellite               | NASA GIBS metadata/imagery tile HTTP ২০০; কোনো console error বা failed request রেকর্ড হয়নি                   |
 
 ## Historical data: source, coverage ও live verification
 
 দুটি Open-Meteo API-কে UI-তে আলাদা রাখা হয়েছে: Historical Weather API-র reanalysis archive এবং Historical Forecast API-র operational NWP forecast archive। নিচের “live পরীক্ষা” কলামে শুধু এই যাচাইয়ে সরাসরি আনা series-এর ফল আছে; বাকিগুলোর তারিখ selector metadata ও unit test-এ যাচাই করা হয়েছে।
 
-| UI-তে source | ডেটার ধরন ও নথিভুক্ত coverage | যাচাইয়ের ফল / আচরণ |
-| --- | --- | --- |
-| ERA5 | Reanalysis; ১৯৪০ থেকে | Dhaka-র কাছে `1980–2025`, `daily=temperature_2m_mean`: ১৬,৮০২/১৬,৮০২ দৈনিক মান। API grid cell `23.750°N, 90.500°E`, elevation ১২ m। |
-| ERA5-Land | Reanalysis; ১৯৫০ থেকে | Source metadata; এই পাসে আলাদা live series টানা হয়নি। |
-| ERA5 Ensemble | Reanalysis; ১৯৪০ থেকে | Source metadata; এই পাসে আলাদা live series টানা হয়নি। |
-| CERRA | Europe-only reanalysis; ১৯৮৫ থেকে, archive শেষ `2021-06-30` | `49.983°N, 10.000°E`, `1985–2020`: ১৩,১৪৮/১৩,১৪৯ দৈনিক মান; একটি missing value বাদ গেছে। Year control ২০২০-তে থামে—এটি শেষ পূর্ণ calendar year। Dhaka-র বাইরে হওয়ায় CERRA API HTTP ৪০০ দেয়; UI-তে Europe-only সীমা জানানো আছে। |
-| NOAA GFS | Historical forecast; `2021-03-23` থেকে | Dhaka grid cell-এ `2021-03-23–2025-12-31`: ১,৭৪৫/১,৭৪৫ দৈনিক মান। ২০২১ আংশিক বছর; request সঠিকভাবে ২৩ মার্চ থেকে শুরু। ১৯৯১–২০২০ পূর্ণ normal নেই, তাই anomaly view দেখানো হয় না। |
-| DWD ICON | Historical forecast; `2022-11-24` থেকে | সঠিক first-available date selector/request bound ও unit test-এ যাচাই; এই পাসে আলাদা full live series টানা হয়নি। |
-| CMA GFS GRAPES | Historical forecast; `2023-12-31` থেকে | সঠিক first-available date selector/request bound ও unit test-এ যাচাই; এই পাসে আলাদা full live series টানা হয়নি। |
+| UI-তে source   | ডেটার ধরন ও নথিভুক্ত coverage                               | যাচাইয়ের ফল / আচরণ                                                                                                                                                                                                             |
+| -------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ERA5           | Reanalysis; ১৯৪০ থেকে                                       | Dhaka-র কাছে `1980–2025`, `daily=temperature_2m_mean`: ১৬,৮০২/১৬,৮০২ দৈনিক মান। API grid cell `23.750°N, 90.500°E`, elevation ১২ m।                                                                                            |
+| ERA5-Land      | Reanalysis; ১৯৫০ থেকে                                       | Source metadata; এই পাসে আলাদা live series টানা হয়নি।                                                                                                                                                                          |
+| ERA5 Ensemble  | Reanalysis; ১৯৪০ থেকে                                       | Source metadata; এই পাসে আলাদা live series টানা হয়নি।                                                                                                                                                                          |
+| CERRA          | Europe-only reanalysis; ১৯৮৫ থেকে, archive শেষ `2021-06-30` | `49.983°N, 10.000°E`, `1985–2020`: ১৩,১৪৮/১৩,১৪৯ দৈনিক মান; একটি missing value বাদ গেছে। Year control ২০২০-তে থামে—এটি শেষ পূর্ণ calendar year। Dhaka-র বাইরে হওয়ায় CERRA API HTTP ৪০০ দেয়; UI-তে Europe-only সীমা জানানো আছে। |
+| NOAA GFS       | Historical forecast; `2021-03-23` থেকে                      | Dhaka grid cell-এ `2021-03-23–2025-12-31`: ১,৭৪৫/১,৭৪৫ দৈনিক মান। ২০২১ আংশিক বছর; request সঠিকভাবে ২৩ মার্চ থেকে শুরু। ১৯৯১–২০২০ পূর্ণ normal নেই, তাই anomaly view দেখানো হয় না।                                              |
+| DWD ICON       | Historical forecast; `2022-11-24` থেকে                      | সঠিক first-available date selector/request bound ও unit test-এ যাচাই; এই পাসে আলাদা full live series টানা হয়নি।                                                                                                                |
+| CMA GFS GRAPES | Historical forecast; `2023-12-31` থেকে                      | সঠিক first-available date selector/request bound ও unit test-এ যাচাই; এই পাসে আলাদা full live series টানা হয়নি।                                                                                                                |
 
 **Coverage কীভাবে প্রয়োগ হয়:** partial first year-এর request documented first-available date দিয়ে clamp হয়—GFS `2021-03-23`, ICON `2022-11-24`, GRAPES `2023-12-31`; এগুলোর জন্য আলাদা `archiveStartDate()` logic ও test আছে। নতুন source-এর সঙ্গে নির্বাচিত সময়সীমার overlap না থাকলে panel অনুপযুক্ত ফাঁকা range ধরে রাখে না—নতুন source-এর পূর্ণ উপলভ্য সীমায় যায়। CERRA-র মাঝবছরের শেষ তারিখের কারণে পূর্ণ-বছরের selector ২০২০-তেই থামে।
 
@@ -55,15 +55,15 @@ Standalone Maps HTML পুনর্নির্মাণ করে Chromium-এ
 
 CORS যাচাইয়ে প্রকৃত endpoint request/response এবং browser resource log দেখা হয়েছে। Wildcard header কেবল পরীক্ষিত anonymous GET response-এর পর্যবেক্ষণ; এটি ভবিষ্যৎ availability, credentialed request বা rate-limit-এর নিশ্চয়তা নয়।
 
-| Resource | HTTP | `Access-Control-Allow-Origin` | ফল |
-| --- | ---: | --- | --- |
-| Open-Meteo light/dark style JSON | ২০০ | `*` | Style JSON browser-এ পড়া যায় |
-| মূল `tiles.open-meteo.com/planet_minimal.json` | ২০০ | অনুপস্থিত | TileJSON সরাসরি browser fetch-এর উপযোগী নয় |
-| মূল Open-Meteo vector MVT | ২০০ | অনুপস্থিত | Browser CORS বাধা এড়াতে এই vector source ব্যবহার করা হয়নি |
-| `https://tiles.openfreemap.org/planet` TileJSON | ২০০ | `*` | CORS-সক্ষম; প্রয়োজনীয় source layer পাওয়া গেছে |
-| OpenFreeMap vector MVT `.pbf` | ২০০ | `*` | Browser-এ সরাসরি tile render হয়েছে |
-| OpenFreeMap Positron ও Dark fallback style | ২০০ | `*` | দুটিই browser-এ পরীক্ষা করা হয়েছে |
-| Glyph PBF, sprite JSON/PNG, Natural Earth raster PNG | ২০০ | `*` | Fallback-এর subresource-ও যাচাই করা হয়েছে |
+| Resource                                             | HTTP | `Access-Control-Allow-Origin` | ফল                                                        |
+| ---------------------------------------------------- | ---: | ----------------------------- | --------------------------------------------------------- |
+| Open-Meteo light/dark style JSON                     |  ২০০ | `*`                           | Style JSON browser-এ পড়া যায়                              |
+| মূল `tiles.open-meteo.com/planet_minimal.json`       |  ২০০ | অনুপস্থিত                     | TileJSON সরাসরি browser fetch-এর উপযোগী নয়                |
+| মূল Open-Meteo vector MVT                            |  ২০০ | অনুপস্থিত                     | Browser CORS বাধা এড়াতে এই vector source ব্যবহার করা হয়নি |
+| `https://tiles.openfreemap.org/planet` TileJSON      |  ২০০ | `*`                           | CORS-সক্ষম; প্রয়োজনীয় source layer পাওয়া গেছে             |
+| OpenFreeMap vector MVT `.pbf`                        |  ২০০ | `*`                           | Browser-এ সরাসরি tile render হয়েছে                        |
+| OpenFreeMap Positron ও Dark fallback style           |  ২০০ | `*`                           | দুটিই browser-এ পরীক্ষা করা হয়েছে                         |
+| Glyph PBF, sprite JSON/PNG, Natural Earth raster PNG |  ২০০ | `*`                           | Fallback-এর subresource-ও যাচাই করা হয়েছে                 |
 
 OpenFreeMap TileJSON-এ Open-Meteo style-এর প্রয়োজনীয় `boundary`, `place`, `transportation`, `water`, `waterway` layer আছে। App TileJSON inline করে; runtime-এ আলাদা TileJSON lookup লাগে না। Attribution-এ OpenFreeMap, OpenMapTiles ও OpenStreetMap রাখা হয়েছে। OpenFreeMap-এর [service page](https://openfreemap.org/) public service-এর attribution ও key-বিহীন ব্যবহারের কথা জানায়; [Quick Start](https://openfreemap.org/quick_start/) সরাসরি MapLibre integration দেখায়। কোনো public CORS proxy যোগ করা হয়নি।
 
