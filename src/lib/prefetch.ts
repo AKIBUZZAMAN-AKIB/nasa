@@ -6,6 +6,7 @@ import { omProtocolSettings } from '$lib/stores/om-protocol-settings';
 
 import { MILLISECONDS_PER_DAY } from './constants';
 import { BASE_URI, fmtModelRun, fmtSelectedTime } from './helpers';
+import { getPrefetchConcurrency } from './runtime-performance';
 import { selectedDomain } from './stores/variables';
 
 import type { DomainMetaDataJson } from '@openmeteo/weather-map-layer';
@@ -125,6 +126,7 @@ export const prefetchData = async (
 		const omFileReader = instance.omFileReader;
 
 		let successCount = 0;
+		let completedCount = 0;
 		const totalCount = timeSteps.length;
 
 		// Helper to prefetch a single time step
@@ -142,8 +144,13 @@ export const prefetchData = async (
 			}
 		};
 
-		// Prefetch multiple time steps in parallel with a simple concurrency limit
-		const concurrency = 8;
+		// Let the UI render the total immediately, then report completed work
+		// (not task indices, which can appear to move backwards out of order).
+		onProgress?.({ current: 0, total: totalCount });
+
+		// Prefetch multiple time steps in parallel, adapting background work to
+		// the available network/device hints while keeping an eight-task ceiling.
+		const concurrency = Math.min(getPrefetchConcurrency(), 8);
 		let index = 0;
 
 		const worker = async () => {
@@ -159,9 +166,8 @@ export const prefetchData = async (
 					localSuccess++;
 				}
 
-				if (onProgress) {
-					onProgress({ current: i + 1, total: totalCount });
-				}
+				completedCount++;
+				onProgress?.({ current: completedCount, total: totalCount });
 			}
 			return localSuccess;
 		};

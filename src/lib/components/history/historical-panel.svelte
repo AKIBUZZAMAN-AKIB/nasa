@@ -13,6 +13,7 @@
 		closeArchive,
 		fetchArchiveSeriesCached,
 		loadArchive,
+		maxYearForVariable,
 		modelSupportsPressureLevels,
 		setArchiveModel,
 		setArchivePeriod,
@@ -39,9 +40,13 @@
 	const panel = $derived($archiveState);
 
 	const variable = $derived(ARCHIVE_VARIABLES.find((v) => v.name === panel.variable));
-	const modelInfo = $derived(ARCHIVE_MODELS.find((m) => m.value === panel.model));
+	const modelInfo = $derived(
+		variable?.endpoint === 'archive'
+			? ARCHIVE_MODELS.find((m) => m.value === panel.model)
+			: undefined
+	);
 
-	/** Pressure-level parameters only resolve for the GFS and ICON families. */
+	/** Pressure-level parameters are only offered for forecast models that publish them. */
 	const availableVariables = $derived(
 		ARCHIVE_VARIABLES.filter(
 			(v) => v.group !== 'pressure-level' || modelSupportsPressureLevels(panel.model)
@@ -49,14 +54,43 @@
 	);
 
 	const minYear = $derived(variable ? startYearForVariable(variable, panel.model) : 1940);
-	const maxYear = $derived(new Date().getUTCFullYear() - 1);
+	const maxYear = $derived(
+		variable ? maxYearForVariable(variable, panel.model) : new Date().getUTCFullYear() - 1
+	);
+	const canShowAnomaly = $derived(
+		variable !== undefined &&
+			minYear <= panel.climatologyStartYear &&
+			maxYear >= panel.climatologyEndYear
+	);
 
-	// Keep the period inside what the selected model can serve.
+	// Keep the year-based period inside the selected source's complete coverage.
 	$effect(() => {
-		if (panel.startYear < minYear) {
-			setArchivePeriod(minYear, Math.max(minYear, panel.endYear));
+		if (
+			panel.startYear < minYear ||
+			panel.startYear > maxYear ||
+			panel.endYear < minYear ||
+			panel.endYear > maxYear
+		) {
+			setArchivePeriod(panel.startYear, panel.endYear);
 		}
 	});
+
+	$effect(() => {
+		if (view === 'anomaly' && !canShowAnomaly) view = 'annual';
+	});
+
+	const visibleViews = $derived.by(() =>
+		canShowAnomaly
+			? [
+					{ key: 'annual' as View, label: 'Annual' },
+					{ key: 'series' as View, label: 'Series' },
+					{ key: 'anomaly' as View, label: 'Anomaly' }
+				]
+			: [
+					{ key: 'annual' as View, label: 'Annual' },
+					{ key: 'series' as View, label: 'Series' }
+				]
+	);
 
 	const annual = $derived.by(() => {
 		const points = panel.series?.points;
@@ -110,7 +144,9 @@
 	let climatologyPoints: { time: number; value: number }[] | undefined = $state(undefined);
 	let climatologyLoading: boolean = $state(false);
 	let climatologyError: string | undefined = $state(undefined);
-	let climatologyKey: string = $state('');
+	// Internal request guard only; it is not rendered state, so keep it
+	// non-reactive to avoid cancelling the just-started effect on assignment.
+	let climatologyKey = '';
 
 	$effect(() => {
 		const v = panel.variable;
@@ -120,10 +156,8 @@
 		if (view !== 'anomaly' || v === undefined || lat === undefined || lon === undefined) return;
 
 		const key = `${v}|${m}|${lat.toFixed(2)}|${lon.toFixed(2)}`;
-		// The effect re-runs whenever any dependency changes, including the ones
-		// this block assigns. Guarding on the key BEFORE writing it keeps the
-		// assignment from re-triggering the effect, which is what would otherwise
-		// loop forever.
+		// Avoid a duplicate request for the same variable, model and grid cell;
+		// the non-reactive key does not itself retrigger or cancel this effect.
 		if (climatologyKey === key) return;
 		climatologyKey = key;
 
@@ -186,8 +220,8 @@
 	 * panel shows that cell rather than the raw click. Three decimals is about
 	 * 100 m, which is more honest than the four the API echoes back.
 	 */
-	function formatCoordinate(value: number): string {
-		const hemisphere = value >= 0 ? 'N' : 'S';
+	function formatCoordinate(value: number, axis: 'latitude' | 'longitude'): string {
+		const hemisphere = axis === 'latitude' ? (value >= 0 ? 'N' : 'S') : value >= 0 ? 'E' : 'W';
 		return `${Math.abs(value).toFixed(3)}°${hemisphere}`;
 	}
 
@@ -212,7 +246,15 @@
 	}
 
 	function selectModel(value: ArchiveModel) {
+		const selected = ARCHIVE_MODELS.find((model) => model.value === value);
 		setArchiveModel(value);
+		if (selected?.kind === 'model') {
+			// A 1991–2020 climatology cannot be built from the short operational-model archive.
+			view = 'annual';
+			climatologyPoints = undefined;
+			climatologyError = undefined;
+			climatologyKey = '';
+		}
 	}
 </script>
 
@@ -228,7 +270,10 @@
 				<h2 class="text-sm font-semibold">Historical analysis</h2>
 				{#if panel.gridLatitude !== undefined && panel.gridLongitude !== undefined}
 					<p class="truncate text-[0.7rem] opacity-70">
-						{formatCoordinate(panel.gridLatitude)}, {formatCoordinate(panel.gridLongitude)}
+						{formatCoordinate(panel.gridLatitude, 'latitude')}, {formatCoordinate(
+							panel.gridLongitude,
+							'longitude'
+						)}
 						{#if panel.elevation !== undefined}· {Math.round(panel.elevation)} m{/if}
 					</p>
 				{/if}
@@ -258,22 +303,42 @@
 					</select>
 				</label>
 
-				<label class="block">
-					<span class="text-[0.7rem] opacity-70">
-						Model {#if modelInfo?.resolution}({modelInfo.resolution}°){/if}
-					</span>
-					<select
-						class="mt-0.5 w-full rounded border bg-transparent px-1.5 py-1 text-xs"
-						value={panel.model}
-						onchange={(e) => selectModel(e.currentTarget.value as ArchiveModel)}
-					>
-						{#each ARCHIVE_MODELS as m (m.value)}
-							<option value={m.value}>{m.label} · from {m.startYear}</option>
-						{/each}
-					</select>
-				</label>
-				{#if modelInfo?.note}
-					<p class="text-[0.65rem] leading-tight opacity-60">{modelInfo.note}</p>
+				{#if variable?.endpoint === 'archive'}
+					<label class="block">
+						<span class="text-[0.7rem] opacity-70">
+							Model {#if modelInfo?.resolution}({modelInfo.resolution}°){/if}
+						</span>
+						<select
+							class="mt-0.5 w-full rounded border bg-transparent px-1.5 py-1 text-xs"
+							value={panel.model}
+							onchange={(e) => selectModel(e.currentTarget.value as ArchiveModel)}
+						>
+							{#each ARCHIVE_MODELS as m (m.value)}
+								<option value={m.value}>
+									{m.label} · from {m.firstAvailableDate ?? m.startYear}
+								</option>
+							{/each}
+						</select>
+					</label>
+					{#if modelInfo?.note}
+						<p class="text-[0.65rem] leading-tight opacity-60">{modelInfo.note}</p>
+					{/if}
+				{:else}
+					<div class="rounded border px-2 py-1.5 text-[0.65rem] leading-tight">
+						<span class="opacity-60">Data source</span>
+						<p>
+							{#if variable?.endpoint === 'marine'}
+								{variable.models === 'era5_ocean'
+									? 'ERA5-Ocean reanalysis'
+									: 'Open-Meteo marine best match'}
+							{:else}
+								CAMS global reanalysis
+							{/if}
+						</p>
+						{#if variable?.note}
+							<p class="mt-0.5 opacity-60">{variable.note}</p>
+						{/if}
+					</div>
 				{/if}
 
 				<div class="flex items-end gap-2">
@@ -311,15 +376,22 @@
 
 			<!-- view tabs -->
 			<div class="flex border-b text-xs">
-				{#each [['annual', 'Annual'], ['series', 'Series'], ['anomaly', 'Anomaly']] as [key, label] (key)}
+				{#each visibleViews as option (option.key)}
 					<button
-						onclick={() => (view = key as View)}
-						class="flex-1 px-2 py-1.5 {view === key ? 'border-b-2 font-semibold' : 'opacity-60'}"
+						onclick={() => (view = option.key)}
+						class="flex-1 px-2 py-1.5 {view === option.key
+							? 'border-b-2 font-semibold'
+							: 'opacity-60'}"
 					>
-						{label}
+						{option.label}
 					</button>
 				{/each}
 			</div>
+			{#if !canShowAnomaly}
+				<p class="px-3 pt-1 text-[0.65rem] opacity-60">
+					Anomaly view needs a complete 1991–2020 baseline, which this source does not cover.
+				</p>
+			{/if}
 
 			<div class="space-y-3 px-3 py-2">
 				{#if panel.status === 'loading'}
@@ -327,7 +399,9 @@
 						{#each [0, 1, 2, 3] as row (row)}
 							<div class="h-3 w-full animate-pulse rounded bg-black/10 dark:bg-white/10"></div>
 						{/each}
-						<p class="text-[0.7rem] opacity-60">Loading reanalysis…</p>
+						<p class="text-[0.7rem] opacity-60">
+							Loading {modelInfo?.kind === 'model' ? 'forecast archive' : 'reanalysis'}…
+						</p>
 					</div>
 				{:else if panel.status === 'error'}
 					<p class="rounded bg-red-500/10 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
@@ -434,6 +508,7 @@
 						<p class="text-right text-[0.65rem] opacity-60">{panel.series.unit}</p>
 
 						{#if ann.summary}
+							{@const thirdChange = ann.summary.lastThirdMean - ann.summary.firstThirdMean}
 							<dl class="grid grid-cols-2 gap-x-3 gap-y-1 text-[0.7rem]">
 								<dt class="opacity-60">Period mean</dt>
 								<dd class="text-right font-medium">
@@ -444,9 +519,9 @@
 								<dd class="text-right font-medium">{ann.summary.firstThirdMean.toFixed(2)}</dd>
 								<dt class="opacity-60">Last third</dt>
 								<dd class="text-right font-medium">{ann.summary.lastThirdMean.toFixed(2)}</dd>
-								<dt class="opacity-60">Warming</dt>
-								<dd class="text-right font-medium text-red-600 dark:text-red-400">
-									+{(ann.summary.lastThirdMean - ann.summary.firstThirdMean).toFixed(2)}
+								<dt class="opacity-60">Last − first third</dt>
+								<dd class="text-right font-medium">
+									{thirdChange >= 0 ? '+' : ''}{thirdChange.toFixed(2)}
 									{panel.series.unit}
 								</dd>
 							</dl>
@@ -683,13 +758,36 @@
 		</div>
 
 		<footer class="border-t px-3 py-1.5 text-[0.65rem] leading-tight opacity-60">
-			ERA5/ERA5-Land reanalysis from
-			<a
-				href="https://archive-api.open-meteo.com"
-				class="underline"
-				rel="noreferrer"
-				target="_blank">Open-Meteo</a
-			>. Past values are model reanalysis, not observations.
+			{#if variable?.endpoint === 'archive' && modelInfo}
+				{modelInfo.label}
+				{modelInfo.kind === 'reanalysis' ? 'reanalysis' : 'archived forecast model data'} from
+				<a
+					href={modelInfo.kind === 'reanalysis'
+						? 'https://open-meteo.com/en/docs/historical-weather-api'
+						: 'https://open-meteo.com/en/docs/historical-forecast-api'}
+					class="underline"
+					rel="noreferrer"
+					target="_blank">Open-Meteo</a
+				>. {modelInfo.kind === 'reanalysis'
+					? 'Model reanalysis, not station observations.'
+					: 'Archived model forecasts, not climate reanalysis.'}
+			{:else if variable?.endpoint === 'marine'}
+				{variable.models === 'era5_ocean' ? 'ERA5-Ocean' : 'Open-Meteo marine best match'} data from
+				<a
+					href="https://open-meteo.com/en/docs/marine-weather-api"
+					class="underline"
+					rel="noreferrer"
+					target="_blank">Open-Meteo</a
+				>.
+			{:else}
+				CAMS global reanalysis from
+				<a
+					href="https://open-meteo.com/en/docs/air-quality-api"
+					class="underline"
+					rel="noreferrer"
+					target="_blank">Open-Meteo</a
+				>.
+			{/if}
 		</footer>
 	</aside>
 {/if}

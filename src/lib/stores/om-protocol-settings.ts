@@ -14,6 +14,7 @@ import {
 	DEFAULT_CACHE_MAX_BYTES_MB,
 	HTTP_OVERHEAD_BYTES
 } from '$lib/constants';
+import { getBlockFetchConcurrency } from '$lib/runtime-performance';
 
 import { chartSources } from './chart';
 
@@ -35,12 +36,15 @@ export const cacheMaxBytesMb = persisted('cache-max-bytes-mb', DEFAULT_CACHE_MAX
 const initialCustomColorScales = get(customColorScales);
 
 function createBlockCache() {
-	if (!browser) return undefined;
+	// The Cache API is unavailable in some local-file and embedded previews.
+	// Keep file reading usable there; caching is an optional optimization.
+	if (!browser || typeof caches === 'undefined') return undefined;
 	return new BrowserBlockCache({
 		blockSize: get(cacheBlockSizeKb) * 1024 - HTTP_OVERHEAD_BYTES,
 		cacheName: 'open-meteo-maps-cache-v1',
 		memCacheTtlMs: 1000,
-		maxBytes: get(cacheMaxBytesMb) * 1024 * 1024
+		maxBytes: get(cacheMaxBytesMb) * 1024 * 1024,
+		maxConcurrentFetches: getBlockFetchConcurrency()
 	});
 }
 
@@ -48,7 +52,13 @@ export const omProtocolSettings: Writable<OmProtocolSettings> = writable({
 	...defaultOmProtocolSettings,
 	// static
 	fileReaderConfig: {
-		useSAB: true,
+		// SharedArrayBuffer requires cross-origin isolation, which local-file,
+		// preview, and plain Vite-dev contexts may not provide.
+		useSAB:
+			browser &&
+			typeof crossOriginIsolated !== 'undefined' &&
+			crossOriginIsolated &&
+			typeof SharedArrayBuffer !== 'undefined',
 		cache: createBlockCache()
 	},
 

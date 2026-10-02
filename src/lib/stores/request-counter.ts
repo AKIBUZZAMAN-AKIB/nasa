@@ -48,15 +48,15 @@ export const apiRequestCounter = persisted('api-request-counter', {
 /**
  * Automatic fallback: while `activeUntil` (epoch ms) is in the future, data
  * requests are rewritten to the uncached S3 origin (no rate limit, slower)
- * and revert when the tripped rate-limit window resets.
+ * and retry the primary endpoint after the recovery window ends.
  */
 export const s3Fallback = persisted('api-s3-fallback', { activeUntil: 0 });
 
 const s3FallbackActive = (): boolean => get(s3Fallback).activeUntil > Date.now();
 
-/** Rate-limit handling toggles from the settings panel. */
+/** Data-endpoint recovery toggles from the settings panel. */
 export const rateLimitOptions = persisted('api-rate-limit-options', {
-	/** Switch to the S3 endpoint automatically after repeated 429s. */
+	/** Switch to the S3 endpoint automatically after repeated 429s or an HTTP 403. */
 	autoSwitch: true,
 	/** Toasts about reached limits and endpoint switches. */
 	notifications: true
@@ -113,7 +113,7 @@ const scheduleSwitchBack = (): void => {
 	clearTimeout(switchBackTimer);
 	switchBackTimer = setTimeout(() => {
 		s3Fallback.set({ activeUntil: 0 });
-		notify(() => toast.info('API rate limit reset, switched back to the fast endpoint'));
+		notify(() => toast.info('Endpoint retry window ended, switched back to the fast endpoint'));
 	}, remaining);
 };
 
@@ -145,6 +145,42 @@ const onLimitReached = (): void => {
 };
 
 let status429Count = 0;
+
+/**
+ * A 403 from the rate-limited endpoint is a hard access denial, not a quota
+ * signal. Retry immediately against the public S3 mirror; unlike 429, waiting
+ * for repeated responses cannot make the denied request usable.
+ *
+ * Returns true when the caller should retry through S3. If automatic switching
+ * is disabled, show one actionable toast and leave the response untouched.
+ */
+const onForbidden = (): boolean => {
+	if (s3FallbackActive()) return true;
+	if (get(rateLimitOptions).autoSwitch) {
+		activateS3Fallback(nextReset(DAY_MS));
+		notify(() =>
+			toast.info('Data endpoint denied access (HTTP 403)', {
+				description: 'Retried through the S3 mirror until the daily reset.'
+			})
+		);
+		return true;
+	}
+	notify(() =>
+		toast('Data endpoint denied access (HTTP 403)', {
+			description: 'Switch to the S3 mirror in Settings to continue.',
+			duration: Number.POSITIVE_INFINITY,
+			id: 'data-endpoint-forbidden',
+			action: {
+				label: 'Use S3 endpoint',
+				onClick: () => {
+					activateS3Fallback(nextReset(DAY_MS));
+					toast.info('Switched to the S3 mirror until the daily reset');
+				}
+			}
+		})
+	);
+	return false;
+};
 
 /** Actual 429 responses are a hard signal: switch automatically after a few. */
 const on429 = async (res: Response): Promise<void> => {
@@ -216,6 +252,70 @@ export const installRequestCounter = (): void => {
 	installed = true;
 	scheduleSwitchBack();
 	const originalFetch = window.fetch;
+
+	/**
+	 * S3 serves ranged GETs with CORS, but its HEAD responses omit
+	 * Access-Control-Allow-Origin. The OM reader uses HEAD to discover file
+	 * size, so synthesize that metadata from a one-byte ranged GET instead.
+	 */
+	const fetchS3MetadataByRange = async (
+		targetUrl: string,
+		input: RequestInfo | URL,
+		init?: RequestInit
+	): Promise<Response> => {
+		const request = input instanceof Request ? input : undefined;
+		const headers = new Headers(request?.headers);
+		if (init?.headers) {
+			new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+		}
+		headers.set('Range', 'bytes=0-0');
+
+		const rangeInit: RequestInit = {
+			...(request
+				? {
+						mode: request.mode,
+						credentials: request.credentials,
+						cache: request.cache,
+						redirect: request.redirect,
+						referrer: request.referrer,
+						referrerPolicy: request.referrerPolicy,
+						integrity: request.integrity,
+						keepalive: request.keepalive,
+						signal: request.signal
+					}
+				: {}),
+			...init,
+			method: 'GET',
+			headers,
+			body: undefined,
+			signal: init?.signal ?? request?.signal
+		};
+
+		const response = await originalFetch.call(window, targetUrl, rangeInit);
+		const contentRange = response.headers.get('content-range');
+		const match =
+			response.status === 206 ? /^bytes\s+\d+-\d+\/(\d+)$/i.exec(contentRange ?? '') : null;
+		const contentLength = match?.[1];
+		const etag = response.headers.get('etag');
+		const lastModified = response.headers.get('last-modified');
+		try {
+			await response.body?.cancel();
+		} catch {
+			// A failed one-byte response cancellation must not block metadata parsing.
+		}
+
+		if (!contentLength) {
+			throw new Error(
+				`Could not read S3 file metadata from a byte range (HTTP ${response.status}, ${contentRange ?? 'no Content-Range'})`
+			);
+		}
+
+		const metadataHeaders = new Headers({ 'Content-Length': contentLength });
+		if (etag) metadataHeaders.set('ETag', etag);
+		if (lastModified) metadataHeaders.set('Last-Modified', lastModified);
+		return new Response(null, { status: 200, headers: metadataHeaders });
+	};
+
 	window.fetch = (input, init) => {
 		let url = '';
 		try {
@@ -223,25 +323,59 @@ export const installRequestCounter = (): void => {
 		} catch {
 			// Counting must never break a request.
 		}
-		if (!url.startsWith(BASE_URI)) return originalFetch.call(window, input, init);
+		const requestMethod = (
+			init?.method ?? (input instanceof Request ? input.method : 'GET')
+		).toUpperCase();
+
+		if (!url.startsWith(BASE_URI)) {
+			// Also handle direct S3 requests, e.g. when an app or custom endpoint
+			// already targets the public mirror.
+			if (url.startsWith(S3_BASE_URI) && requestMethod === 'HEAD') {
+				return fetchS3MetadataByRange(url, input, init);
+			}
+			return originalFetch.call(window, input, init);
+		}
+
 		const base = rewriteBase();
 		const targetUrl = base ? base + url.slice(BASE_URI.length) : url;
 		// Only requests that end up on the rate-limited endpoint count.
 		const limited = targetUrl.startsWith(DATA_SPATIAL_BASE_URI);
 		if (limited) increment();
+		// Preserve a clone before fetch consumes a Request body; model-data calls
+		// are GETs today, but this keeps the retry safe for future request options.
+		const retryRequest = limited && input instanceof Request ? input.clone() : undefined;
+
+		// S3's HEAD response is not CORS-readable; use its CORS-enabled Range GET.
+		if (targetUrl.startsWith(S3_BASE_URI) && requestMethod === 'HEAD') {
+			return fetchS3MetadataByRange(targetUrl, input, init);
+		}
+
 		const targetInput = !base
 			? input
 			: typeof input === 'string' || input instanceof URL
 				? targetUrl
 				: new Request(targetUrl, input);
 		const response = originalFetch.call(window, targetInput, init);
-		if (limited) {
-			response
-				.then((res) => {
-					if (res.status === 429) on429(res);
-				})
-				.catch(() => {});
-		}
-		return response;
+		if (!limited) return response;
+
+		// A hard 403 is retried once immediately through the unmetered S3 mirror.
+		// This also handles metadata JSONs, whose failure occurs before tile reads.
+		return response.then(async (res) => {
+			if (res.status === 403 && onForbidden()) {
+				const fallbackUrl = S3_BASE_URI + url.slice(BASE_URI.length);
+				const fallbackInput = retryRequest ? new Request(fallbackUrl, retryRequest) : fallbackUrl;
+				try {
+					await res.body?.cancel();
+				} catch {
+					// A failed 403 body cancellation must not block the S3 retry.
+				}
+				if (requestMethod === 'HEAD') {
+					return fetchS3MetadataByRange(fallbackUrl, retryRequest ?? input, init);
+				}
+				return originalFetch.call(window, fallbackInput, init);
+			}
+			if (res.status === 429) void on429(res);
+			return res;
+		});
 	};
 };

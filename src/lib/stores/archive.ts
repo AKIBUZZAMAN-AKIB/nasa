@@ -1,29 +1,22 @@
 /**
- * Open-Meteo reanalysis archive client.
+ * Open-Meteo historical weather and forecast-archive clients.
  *
- * The forecast side of the app reads spatial `.om` files that are only retained
- * for 7 days, so it cannot answer anything about climate. This client talks to
- * the sibling `archive-api` endpoints, which serve ERA5 back to 1940, and is
- * used by the historical analysis panel.
+ * Consistent reanalysis records (ERA5/ERA5-Land/ERA5-Ensemble/CERRA) use the
+ * Historical Weather API. Operational forecast-model archives (GFS/ICON/CMA)
+ * use the separate Historical Forecast API; they are short records and are not
+ * interchangeable with reanalysis for climate-trend analysis. Marine and air
+ * quality series use their corresponding sibling APIs.
  *
- * Two findings from probing the live API shape the implementation:
- *
- *  1. A request can return HTTP 200 while every value of a variable is `null`.
- *     `cape`, `visibility`, `soil_moisture_*` and all pressure levels behave this
- *     way for the ERA5 model. Treating "success" as HTTP status alone would render
- *     an empty chart with no explanation, so `isUsableVariable` gates on actual
- *     numbers and the panel reports the variable as unavailable.
- *  2. Pressure-level variables only resolve for the GFS and ICON families, not
- *     for `era5`. `modelSupportsPressureLevels` encodes that, so the panel can
- *     offer levels for a model that can actually serve them.
- *
- * All requests are plain GETs to endpoints that send
- * `access-control-allow-origin: *`, so this works from the browser directly.
- * No API key is required for non-commercial use.
+ * A request can return HTTP 200 while every value of a variable is `null`.
+ * `isUsableVariable` gates on actual numbers so the panel can explain a missing
+ * series instead of drawing an empty chart. All services are queried directly
+ * with GET requests and have been verified to return `Access-Control-Allow-Origin: *`.
+ * No key is required for non-commercial use within the published limits.
  */
 import { type Writable, writable } from 'svelte/store';
 
 const ARCHIVE_BASE = 'https://archive-api.open-meteo.com/v1/archive';
+const FORECAST_ARCHIVE_BASE = 'https://historical-forecast-api.open-meteo.com/v1/forecast';
 const MARINE_BASE = 'https://marine-api.open-meteo.com/v1/marine';
 const AIR_QUALITY_BASE = 'https://air-quality-api.open-meteo.com/v1/air-quality';
 
@@ -54,13 +47,17 @@ export type ArchiveModel =
 export interface ArchiveModelInfo {
 	value: ArchiveModel;
 	label: string;
-	/** Earliest year with data, verified against the live API. */
+	/** Earliest calendar year with data. */
 	startYear: number;
-	/** Grid spacing in degrees. */
+	/** Exact documented archive start when coverage begins mid-year. */
+	firstAvailableDate?: string;
+	/** Last full calendar year exposed by this year-based analysis UI. */
+	lastCompleteYear?: number;
+	/** Grid spacing in degrees; forecast pressure-level grids may differ. */
 	resolution: number;
 	/** Reanalysis is observation-driven and final; forecast models are not. */
 	kind: 'reanalysis' | 'model';
-	/** Only these families expose pressure-level variables. */
+	/** This model exposes pressure-level variables. */
 	pressureLevels: boolean;
 	note?: string;
 }
@@ -87,28 +84,32 @@ export const ARCHIVE_MODELS: ArchiveModelInfo[] = [
 	{
 		value: 'gfs_seamless',
 		label: 'NOAA GFS',
-		startYear: 2000,
-		resolution: 0.25,
+		startYear: 2021,
+		firstAvailableDate: '2021-03-23',
+		resolution: 0.11,
 		kind: 'model',
 		pressureLevels: true,
-		note: 'NOAA global model. Serves pressure levels.'
+		note: 'Historical Forecast archive from 2021-03-23; 2021 is partial. Global surface grid ~0.11°; pressure-level fields use a coarser grid. Forecast output, not climate reanalysis.'
 	},
 	{
 		value: 'icon_seamless',
 		label: 'DWD ICON',
-		startYear: 2017,
-		resolution: 0.25,
+		startYear: 2022,
+		firstAvailableDate: '2022-11-24',
+		resolution: 0.1,
 		kind: 'model',
 		pressureLevels: true,
-		note: 'DWD global model. Serves pressure levels.'
+		note: 'Global ICON forecast archive from 2022-11-24; 2022 is partial. Forecast output, not a climate-consistent reanalysis.'
 	},
 	{
 		value: 'cma_grapes_global',
 		label: 'CMA GRAPES',
-		startYear: 2016,
-		resolution: 0.25,
+		startYear: 2023,
+		firstAvailableDate: '2023-12-31',
+		resolution: 0.125,
 		kind: 'model',
-		pressureLevels: true
+		pressureLevels: true,
+		note: 'Global GFS GRAPES forecast archive from 2023-12-31; only one day is available in 2023, so 2024 is the first full calendar year. Native output is 3-hourly.'
 	},
 	{
 		value: 'era5_ensemble',
@@ -117,16 +118,17 @@ export const ARCHIVE_MODELS: ArchiveModelInfo[] = [
 		resolution: 0.5,
 		kind: 'reanalysis',
 		pressureLevels: false,
-		note: 'Ensemble mean. Members are not exposed individually.'
+		note: 'Coarser 0.5° grid with 3-hourly native resolution; much less detailed than ERA5-Land.'
 	},
 	{
 		value: 'cerra',
 		label: 'CERRA',
 		startYear: 1985,
+		lastCompleteYear: 2020,
 		resolution: 0.09,
 		kind: 'reanalysis',
 		pressureLevels: false,
-		note: 'High-resolution European reanalysis, 1985-2021.'
+		note: 'Europe-only reanalysis. Coverage ends 2021-06-30; the year picker stops at 2020 to avoid treating partial 2021 as a full year.'
 	}
 ];
 
@@ -624,9 +626,55 @@ export function startYearForVariable(variable: ArchiveVariable, model: ArchiveMo
 	return getArchiveModel(model)?.startYear ?? 1940;
 }
 
+/** Last complete calendar year supported by a variable/model pair. */
+export function maxYearForVariable(
+	variable: ArchiveVariable,
+	model: ArchiveModel,
+	currentYear = new Date().getUTCFullYear()
+): number {
+	const latestCompleteYear = currentYear - 1;
+	if (variable.endpoint !== 'archive') return latestCompleteYear;
+	return Math.min(
+		getArchiveModel(model)?.lastCompleteYear ?? latestCompleteYear,
+		latestCompleteYear
+	);
+}
+
+/** Avoid sending pre-coverage dates for the first partial year of a model archive. */
+export function archiveStartDate(model: ArchiveModel, startYear: number): string {
+	const yearStart = `${Math.floor(startYear)}-01-01`;
+	const firstAvailableDate = getArchiveModel(model)?.firstAvailableDate;
+	if (firstAvailableDate && Math.floor(startYear) <= Number(firstAvailableDate.slice(0, 4))) {
+		return firstAvailableDate;
+	}
+	return yearStart;
+}
+
+/** Clamp and order a year-based selection to the selected source's coverage. */
+export function clampArchivePeriod(
+	variable: ArchiveVariable,
+	model: ArchiveModel,
+	startYear: number,
+	endYear: number,
+	currentYear = new Date().getUTCFullYear()
+): { startYear: number; endYear: number } {
+	const max = maxYearForVariable(variable, model, currentYear);
+	const min = Math.min(startYearForVariable(variable, model), max);
+	const requestedStart = Math.min(Math.floor(startYear), Math.floor(endYear));
+	const requestedEnd = Math.max(Math.floor(startYear), Math.floor(endYear));
+
+	// When a source switch leaves no overlap (for example CERRA → GFS), show
+	// that new source's full available calendar-year range instead of one empty year.
+	if (requestedEnd < min || requestedStart > max) return { startYear: min, endYear: max };
+
+	const a = Math.min(max, Math.max(min, requestedStart));
+	const b = Math.min(max, Math.max(min, requestedEnd));
+	return { startYear: Math.min(a, b), endYear: Math.max(a, b) };
+}
+
 /**
- * Pressure-level parameters only resolve for the GFS and ICON families. ERA5
- * accepts the name and returns null, so the panel must not offer levels there.
+ * Pressure-level parameters resolve only for forecast-model families; ERA5
+ * accepts the names but returns all-null values, so the panel gates the picker.
  */
 export function modelSupportsPressureLevels(model: ArchiveModel): boolean {
 	return getArchiveModel(model)?.pressureLevels ?? false;
@@ -730,7 +778,7 @@ const BASE_BY_ENDPOINT: Record<ArchiveEndpoint, string> = {
 	'air-quality': AIR_QUALITY_BASE
 };
 
-function buildUrl(
+export function buildArchiveUrl(
 	variable: ArchiveVariable,
 	model: ArchiveModel,
 	lat: number,
@@ -765,7 +813,11 @@ function buildUrl(
 		// reanalysis is higher resolution but Europe-only.
 		params.set('domains', 'cams_global');
 	}
-	return `${BASE_BY_ENDPOINT[variable.endpoint]}?${params.toString()}`;
+	const base =
+		variable.endpoint === 'archive' && getArchiveModel(model)?.kind === 'model'
+			? FORECAST_ARCHIVE_BASE
+			: BASE_BY_ENDPOINT[variable.endpoint];
+	return `${base}?${params.toString()}`;
 }
 
 /**
@@ -801,9 +853,9 @@ async function requestArchiveSeries(
 	endYear: number,
 	resolution: ArchiveResolution
 ): Promise<ArchiveResult> {
-	const start = `${Math.floor(startYear)}-01-01`;
+	const start = archiveStartDate(model, startYear);
 	const end = `${Math.floor(endYear)}-12-31`;
-	const url = buildUrl(variable, model, lat, lon, start, end, resolution);
+	const url = buildArchiveUrl(variable, model, lat, lon, start, end, resolution);
 
 	const response = await fetch(url);
 	const body = (await response.json()) as ArchiveResponse;
@@ -1038,16 +1090,21 @@ export function openArchiveAt(
 	variable = 'temperature_2m',
 	model: ArchiveModel = 'era5'
 ): void {
+	const current = get(archiveState);
+	const definition = getArchiveVariable(variable);
+	const period = definition
+		? clampArchivePeriod(definition, model, current.startYear, current.endYear)
+		: { startYear: current.startYear, endYear: current.endYear };
 	archiveState.update((s) => ({
 		...s,
 		open: true,
 		latitude: lat,
 		longitude: lon,
 		variable,
-		model
+		model,
+		...period
 	}));
-	const { startYear, endYear } = get(archiveState);
-	void loadArchive(variable, model, lat, lon, startYear, endYear);
+	void loadArchive(variable, model, lat, lon, period.startYear, period.endYear);
 }
 
 export function closeArchive(): void {
@@ -1057,30 +1114,50 @@ export function closeArchive(): void {
 
 /** Change variable and reload, keeping location and period. */
 export function setArchiveVariable(variable: string): void {
-	archiveState.update((s) => ({ ...s, variable }));
+	const current = get(archiveState);
+	const definition = getArchiveVariable(variable);
+	const period = definition
+		? clampArchivePeriod(definition, current.model, current.startYear, current.endYear)
+		: { startYear: current.startYear, endYear: current.endYear };
+	archiveState.update((s) => ({ ...s, variable, ...period }));
 	const s = get(archiveState);
 	if (s.latitude !== undefined && s.longitude !== undefined) {
-		void loadArchive(variable, s.model, s.latitude, s.longitude, s.startYear, s.endYear);
+		void loadArchive(variable, s.model, s.latitude, s.longitude, period.startYear, period.endYear);
 	}
 }
 
-/** Change model and reload, keeping location and period. */
+/** Change model and reload, keeping the closest valid part of the period. */
 export function setArchiveModel(model: ArchiveModel): void {
-	archiveState.update((s) => ({ ...s, model }));
+	const current = get(archiveState);
+	const definition = getArchiveVariable(current.variable);
+	const period = definition
+		? clampArchivePeriod(definition, model, current.startYear, current.endYear)
+		: { startYear: current.startYear, endYear: current.endYear };
+	archiveState.update((s) => ({ ...s, model, ...period }));
 	const s = get(archiveState);
 	if (s.latitude !== undefined && s.longitude !== undefined) {
-		void loadArchive(s.variable, model, s.latitude, s.longitude, s.startYear, s.endYear);
+		void loadArchive(s.variable, model, s.latitude, s.longitude, period.startYear, period.endYear);
 	}
 }
 
-/** Change the analysis period and reload. */
+/** Change the analysis period and reload, respecting the selected source's coverage. */
 export function setArchivePeriod(startYear: number, endYear: number): void {
-	const from = Math.min(startYear, endYear);
-	const to = Math.max(startYear, endYear);
-	archiveState.update((s) => ({ ...s, startYear: from, endYear: to }));
+	const current = get(archiveState);
+	const definition = getArchiveVariable(current.variable);
+	const period = definition
+		? clampArchivePeriod(definition, current.model, startYear, endYear)
+		: { startYear: Math.floor(startYear), endYear: Math.floor(endYear) };
+	archiveState.update((s) => ({ ...s, ...period }));
 	const s = get(archiveState);
 	if (s.latitude !== undefined && s.longitude !== undefined) {
-		void loadArchive(s.variable, s.model, s.latitude, s.longitude, from, to);
+		void loadArchive(
+			s.variable,
+			s.model,
+			s.latitude,
+			s.longitude,
+			period.startYear,
+			period.endYear
+		);
 	}
 }
 

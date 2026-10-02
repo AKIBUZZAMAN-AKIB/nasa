@@ -10,6 +10,7 @@
 	import GridSettings from './grid-settings.svelte';
 	import InterpolationSettings from './interpolation-settings.svelte';
 	import OpacitySetting from './opacity-setting.svelte';
+	import PerformanceSettings from './performance-settings.svelte';
 	import PopupSettings from './popup-settings.svelte';
 	import StateSettings from './state-settings.svelte';
 	import TileSizeSettings from './tile-size-settings.svelte';
@@ -32,6 +33,7 @@
 			<PopupSettings />
 			<WaterClipSetting />
 			<OpacitySetting />
+			<PerformanceSettings />
 			<CacheSettings />
 			<EndpointSettings />
 			<StateSettings />

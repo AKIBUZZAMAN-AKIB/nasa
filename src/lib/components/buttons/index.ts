@@ -13,7 +13,7 @@ import {
 } from '$lib/stores/preferences';
 
 import { reanchorRasterLayers } from '$lib/layers';
-import { addHillshadeLayer, terrainHandler } from '$lib/map-controls';
+import { addHillshadeLayer, addTerrainSource, terrainHandler } from '$lib/map-controls';
 import { updateUrl } from '$lib/url';
 
 const preferences = get(p);
@@ -154,6 +154,7 @@ export class HillshadeButton {
 	private addTerrainControl() {
 		if (!this.map || this.terrainControl) return;
 
+		addTerrainSource(this.map, 'terrainSource2');
 		this.terrainControl = new maplibregl.TerrainControl({
 			source: 'terrainSource2',
 			exaggeration: 1

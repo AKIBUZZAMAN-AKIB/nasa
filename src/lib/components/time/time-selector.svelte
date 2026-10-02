@@ -621,7 +621,8 @@
 	const signal = listenerController.signal;
 	let resizeObserver: ResizeObserver | undefined;
 
-	const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+	const isSafari =
+		typeof navigator !== 'undefined' && /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 	onMount(() => {
 		if (hoursHoverContainer) {
 			hoursHoverContainer.addEventListener(

@@ -73,7 +73,12 @@ export const updateUrl = async (
 	try {
 		const map = get(m);
 		if (map) {
-			fullUrl = String(url) + map._hash.getHashString();
+			// `url` is seeded from document.location and can still contain the
+			// previous map hash. Remove it before appending the live camera state,
+			// otherwise every update duplicates `#zoom/lat/lon` in the share URL.
+			const baseUrl = new URL(url);
+			baseUrl.hash = '';
+			fullUrl = String(baseUrl) + map._hash.getHashString();
 		} else {
 			fullUrl = String(url);
 		}

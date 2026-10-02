@@ -39,12 +39,7 @@
 	import { postEmbedderReady, startEmbedderBridge, stopEmbedderBridge } from '$lib/embed';
 	import { destroyGibsLayers, initGibsLayers } from '$lib/gibs-layers';
 	import { addOmFileLayers, changeOMfileURL, setWeatherLayersSuppressed } from '$lib/layers';
-	import {
-		addTerrainSource,
-		createMap,
-		getAppliedStyleMode,
-		reloadStyles
-	} from '$lib/map-controls';
+	import { createMap, getAppliedStyleMode, reloadStyles } from '$lib/map-controls';
 	import { loadDomainMetaData } from '$lib/metadata';
 	import { addPopup } from '$lib/popup';
 	import { syncChartToUrl, updateUrl, urlParamsToPreferences } from '$lib/url';
@@ -106,8 +101,8 @@
 			// user-initiated and should reset the selected model run.
 			initialLoadComplete = true;
 
-			addTerrainSource($map);
-			addTerrainSource($map, 'terrainSource2');
+			// Terrain DEM sources are registered only when the hillshade/terrain
+			// controls are enabled, avoiding unused terrain-source work on startup.
 			$map.addControl(new HillshadeButton());
 			clippingPanel?.initTerraDraw();
 

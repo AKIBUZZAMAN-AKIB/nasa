@@ -37,7 +37,7 @@ const config = {
 		// job: resetting persisted state, see initStoredState in preferences.ts.
 		version: {
 			name: buildVersion(),
-			pollInterval: 2 * 60 * 1000 // 2 mins
+			pollInterval: process.env.OPEN_METEO_MAPS_ONEFILE === '1' ? 0 : 2 * 60 * 1000 // 2 mins
 		}
 	},
 	extensions: ['.svelte', '.svx']

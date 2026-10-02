@@ -283,7 +283,10 @@ const hideAll = (): void => {
  * fetch a changed frame into the hidden slot first, and cross-fade when it is in.
  */
 const pump = async (): Promise<void> => {
-	if (!map || !map.isStyleLoaded()) return;
+	// `isStyleLoaded()` also waits on every visible source tile and can remain
+	// false while forecast layers are being cleared or read from the data API.
+	// GIBS only needs the parsed style (its layer list) to be available here.
+	if (!map || !map.getStyle()?.layers?.length) return;
 	if (pumping) {
 		dirty = true;
 		return;

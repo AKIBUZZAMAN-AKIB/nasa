@@ -6,6 +6,7 @@ import {
 	apiRequestCounter,
 	endpointChoice,
 	installRequestCounter,
+	rateLimitOptions,
 	s3Fallback,
 	setEndpointMode
 } from '$lib/stores/request-counter';
@@ -47,11 +48,11 @@ describe('installRequestCounter', () => {
 	it('keeps method and headers of a rewritten Request', async () => {
 		setEndpointMode('s3');
 		await window.fetch(
-			new Request(BASE_URI + path, { method: 'HEAD', headers: { Range: 'bytes=0-1' } })
+			new Request(BASE_URI + path, { method: 'GET', headers: { Range: 'bytes=0-1' } })
 		);
 		const sent = originalFetch.mock.calls[0][0] as Request;
 		expect(sent.url).toBe(S3_BASE_URI + path);
-		expect(sent.method).toBe('HEAD');
+		expect(sent.method).toBe('GET');
 		expect(sent.headers.get('range')).toBe('bytes=0-1');
 	});
 
@@ -60,6 +61,68 @@ describe('installRequestCounter', () => {
 		s3Fallback.set({ activeUntil: Date.now() + 60_000 });
 		await window.fetch(BASE_URI + path);
 		expect(originalFetch).toHaveBeenCalledWith(S3_BASE_URI + path, undefined);
+	});
+
+	it('retries a 403 from the rate-limited endpoint through the S3 mirror', async () => {
+		setEndpointMode('default');
+		rateLimitOptions.update((options) => ({ ...options, autoSwitch: true }));
+		originalFetch.mockResolvedValueOnce(new Response('{"reason":"Forbidden"}', { status: 403 }));
+
+		await window.fetch(BASE_URI + '/dwd_icon/latest.json');
+
+		expect(originalFetch).toHaveBeenCalledTimes(2);
+		expect(originalFetch.mock.calls[0][0]).toBe(BASE_URI + '/dwd_icon/latest.json');
+		expect(originalFetch.mock.calls[1][0]).toBe(S3_BASE_URI + '/dwd_icon/latest.json');
+		expect(get(s3Fallback).activeUntil).toBeGreaterThan(Date.now());
+	});
+
+	it('replaces a forbidden HEAD with a CORS-readable ranged GET for S3 metadata', async () => {
+		setEndpointMode('default');
+		rateLimitOptions.update((options) => ({ ...options, autoSwitch: true }));
+		originalFetch
+			.mockResolvedValueOnce(new Response('{"reason":"Forbidden"}', { status: 403 }))
+			.mockResolvedValueOnce(
+				new Response(new Uint8Array([0]), {
+					status: 206,
+					headers: {
+						'Content-Range': 'bytes 0-0/168569984',
+						ETag: '"weather-file-etag"',
+						'Last-Modified': 'Thu, 01 Oct 2026 02:43:04 GMT'
+					}
+				})
+			);
+
+		const response = await window.fetch(BASE_URI + path, { method: 'HEAD' });
+		const [rangeUrl, rangeInit] = originalFetch.mock.calls[1];
+
+		expect(originalFetch).toHaveBeenCalledTimes(2);
+		expect(rangeUrl).toBe(S3_BASE_URI + path);
+		expect(rangeInit?.method).toBe('GET');
+		expect(new Headers(rangeInit?.headers).get('range')).toBe('bytes=0-0');
+		expect(response.status).toBe(200);
+		expect(response.headers.get('content-length')).toBe('168569984');
+		expect(response.headers.get('etag')).toBe('"weather-file-etag"');
+		expect(response.headers.get('last-modified')).toBe('Thu, 01 Oct 2026 02:43:04 GMT');
+		expect(get(s3Fallback).activeUntil).toBeGreaterThan(Date.now());
+	});
+
+	it('uses ranged metadata reads when S3 is selected manually', async () => {
+		setEndpointMode('s3');
+		originalFetch.mockResolvedValueOnce(
+			new Response(new Uint8Array([0]), {
+				status: 206,
+				headers: { 'Content-Range': 'bytes 0-0/12345' }
+			})
+		);
+
+		const response = await window.fetch(BASE_URI + path, { method: 'HEAD' });
+		const [rangeUrl, rangeInit] = originalFetch.mock.calls[0];
+
+		expect(originalFetch).toHaveBeenCalledTimes(1);
+		expect(rangeUrl).toBe(S3_BASE_URI + path);
+		expect(rangeInit?.method).toBe('GET');
+		expect(new Headers(rangeInit?.headers).get('range')).toBe('bytes=0-0');
+		expect(response.headers.get('content-length')).toBe('12345');
 	});
 
 	it('uses a custom endpoint without its trailing slash', async () => {

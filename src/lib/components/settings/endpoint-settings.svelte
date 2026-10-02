@@ -73,7 +73,7 @@
 				bind:checked={$rateLimitOptions.autoSwitch}
 			/>
 			<Label for="rate-limit-auto-switch" class="cursor-pointer">
-				Switch to S3 automatically when rate limited
+				Switch to S3 automatically when access is denied or rate limited
 			</Label>
 		</div>
 		<div class="flex gap-3">
