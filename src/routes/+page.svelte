@@ -23,12 +23,14 @@
 		SettingsButton
 	} from '$lib/components/buttons';
 	import { HistoryButton } from '$lib/components/buttons/history-button';
+	import { PowerButton } from '$lib/components/buttons/power-button';
 	import ClippingPanel from '$lib/components/clipping/clipping-panel.svelte';
 	import Dropzone from '$lib/components/dropzone/dropzone.svelte';
 	import HelpDialog from '$lib/components/help/help-dialog.svelte';
 	import HistoricalPanel from '$lib/components/history/historical-panel.svelte';
 	import KeyboardHandler from '$lib/components/keyboard/keyboard-handler.svelte';
 	import Spinner from '$lib/components/loading/spinner.svelte';
+	import PowerPanel from '$lib/components/power/power-panel.svelte';
 	import Scale from '$lib/components/scale/scale.svelte';
 	import SelectionPanel from '$lib/components/selection/selection-panel.svelte';
 	import Settings from '$lib/components/settings/settings.svelte';
@@ -93,6 +95,7 @@
 			$map.addControl(darkModeButton);
 			$map.addControl(new SettingsButton());
 			$map.addControl(new HistoryButton());
+			$map.addControl(new PowerButton());
 			$map.addControl(new HelpButton());
 			$map.addControl(new ClippingButton());
 
@@ -196,6 +199,7 @@
 <SelectionPanel />
 <ClippingPanel bind:this={clippingPanel} />
 <HistoricalPanel />
+<PowerPanel />
 <TimeSelector />
 <Settings />
 <HelpDialog />

@@ -3,6 +3,7 @@ import { get } from 'svelte/store';
 import { archiveState } from '$lib/stores/archive';
 import { activeChart, pickPrimaryVariable } from '$lib/stores/chart';
 import { map } from '$lib/stores/map';
+import { closePowerPanel } from '$lib/stores/power';
 
 /**
  * Toggles the historical analysis panel.
@@ -45,6 +46,8 @@ export class HistoryButton {
 				archiveState.update((s) => ({ ...s, open: false }));
 				return;
 			}
+			// The two data explorers share the same map corner; show one panel at a time.
+			closePowerPanel();
 			// Seed with the map centre so the panel shows something useful at
 			// once, and carry the on-map variable across as the default.
 			const centre = get(map)?.getCenter();
