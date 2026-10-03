@@ -105,6 +105,10 @@
 	};
 
 	let activeTab = $state<MainTab>('data');
+	let panelIsOpen = $state(false);
+	const unsubscribePanelState = powerPanelState.subscribe((state) => {
+		panelIsOpen = state.open;
+	});
 	let latitude = $state(23.8103);
 	let longitude = $state(90.4125);
 	let latitudeMin = $state(22.8);
@@ -714,7 +718,7 @@
 	}
 
 	$effect(() => {
-		const isOpen = $powerPanelState.open;
+		const isOpen = panelIsOpen;
 		const currentTab = activeTab;
 		const currentTemporal = temporal;
 		const currentCommunity = community;
@@ -727,7 +731,7 @@
 	});
 
 	$effect(() => {
-		const isOpen = $powerPanelState.open;
+		const isOpen = panelIsOpen;
 		const currentTab = activeTab;
 		const currentApplication = application;
 		const currentSpatial = applicationSpatial;
@@ -739,7 +743,7 @@
 	});
 
 	$effect(() => {
-		const isOpen = $powerPanelState.open;
+		const isOpen = panelIsOpen;
 		const currentTab = activeTab;
 		const currentView = catalogView;
 		const currentCommunity = catalogCommunity;
@@ -751,7 +755,7 @@
 	});
 
 	$effect(() => {
-		if ($powerPanelState.open) {
+		if (panelIsOpen) {
 			const nextLatitude = $powerPanelState.latitude;
 			const nextLongitude = $powerPanelState.longitude;
 			if (nextLatitude !== undefined) latitude = nextLatitude;
@@ -795,7 +799,7 @@
 	});
 
 	$effect(() => {
-		const isOpen = $powerPanelState.open;
+		const isOpen = panelIsOpen;
 		if (!isOpen && pickingMap) cancelMapPick();
 	});
 
@@ -1360,17 +1364,18 @@
 		unsubscribeOverlay();
 		unsubscribeOverlayVisibility();
 		unsubscribeMap();
+		unsubscribePanelState();
 		if (currentMap && styleListener) currentMap.off('styledata', styleListener);
 		syncPowerGridLayer(currentMap, undefined, false);
 	});
 </script>
 
-{#if $powerPanelState.open}
+{#if panelIsOpen}
 	<aside
 		transition:fly={{ y: 12, duration: 180 }}
 		data-credit-blocker
 		aria-label="NASA POWER data explorer"
-		class="absolute right-2 z-50 flex max-h-[78dvh] w-[min(94vw,34rem)] flex-col overflow-hidden rounded-lg border bg-glass/95 shadow-xl backdrop-blur-md"
+		class="fixed right-2 z-80 flex max-h-[78dvh] w-[min(94vw,34rem)] flex-col overflow-hidden rounded-lg border bg-glass/95 shadow-xl backdrop-blur-md"
 		style:bottom="max(7.5rem, calc(var(--om-credit-bottom) + var(--om-credit-height) + 0.5rem))"
 	>
 		<header class="flex items-start justify-between gap-3 border-b px-3 py-2.5">
