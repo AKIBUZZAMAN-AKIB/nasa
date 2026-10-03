@@ -35,6 +35,7 @@
 	"devDependencies": {
 		"@internationalized/date": "^3.12.4",
 		"@lucide/svelte": "^1.47.0",
+		"@maptoolkit/maplibre-logo-control": "^1.0.0",
 		"@openmeteo/file-reader": "^0.0.20",
 		"@openmeteo/weather-map-layer": "^0.2.0",
 		"@sveltejs/adapter-static": "^3.0.8",

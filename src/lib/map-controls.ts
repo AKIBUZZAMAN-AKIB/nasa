@@ -1,5 +1,7 @@
 import { get } from 'svelte/store';
 
+import { LogoControl } from '@maptoolkit/maplibre-logo-control';
+import '@maptoolkit/maplibre-logo-control/style.css';
 import {
 	type Domain,
 	GridFactory,
@@ -24,6 +26,24 @@ import {
 	HILLSHADE_LAYER
 } from '$lib/constants';
 
+import {
+	BASEMAP_LABELS,
+	type BasemapProvider,
+	OutageDetector,
+	ProviderCooldown,
+	type StyleJson,
+	addHiddenAnchor,
+	attributionOptionsFor,
+	candidateProviders,
+	checkMaptoolkitTileJson,
+	fetchJson,
+	maptoolkitStyleUrl,
+	nextProvider,
+	parseProviderOrder,
+	prepareMaptoolkitStyle,
+	primaryVectorSource,
+	resolveMaptoolkitLanguage
+} from './basemap';
 import { addOmFileLayers } from './layers';
 import { shouldCancelPendingTilesWhileZooming } from './runtime-performance';
 import { updateUrl } from './url';
@@ -42,7 +62,7 @@ export const createMap = async (container: HTMLElement) => {
 	maplibregl.addProtocol('om', ((params: RequestParameters, abortController: AbortController) =>
 		omProtocol(params, abortController, get(omProtocolSettings))) as AddProtocolAction);
 
-	const style = await getStyle();
+	const basemap = await resolveBasemap();
 
 	const domainObject = domainOptions.find(({ value }: Domain) => value === get(d));
 	if (!domainObject) {
@@ -52,17 +72,22 @@ export const createMap = async (container: HTMLElement) => {
 
 	const map = new maplibregl.Map({
 		container,
-		style,
+		style: basemap.style,
 		center: grid.getCenter(),
 		zoom: domainObject.grid.zoom,
 		keyboard: false,
 		hash: true,
 		maxPitch: 85,
+		// The attribution control depends on the basemap provider and is added
+		// by applyBasemapCredits()
+		attributionControl: false,
 		// On constrained/slow connections, drop obsolete lower-zoom tiles while
 		// zooming instead of spending time and bandwidth on pixels the user left.
 		cancelPendingTileRequestsWhileZooming: shouldCancelPendingTilesWhileZooming()
 	});
 	m.set(map);
+	applyBasemapCredits(map, basemap);
+	watchBasemapHealth(map, basemap);
 
 	setMapControlSettings();
 
@@ -155,36 +180,16 @@ let appliedStyleMode: 'light' | 'dark' = 'light';
 
 export const getAppliedStyleMode = () => appliedStyleMode;
 
-let warnedBasemapFallback = false;
+/**
+ * Basemap providers in order of preference. Maptoolkit comes first; the two
+ * independent styles that were the app's basemap before are its fallbacks.
+ * `VITE_BASEMAP_PROVIDERS` can reorder or drop providers (see `.env.example`).
+ */
+const PROVIDER_ORDER = parseProviderOrder(import.meta.env.VITE_BASEMAP_PROVIDERS);
+const MAPTOOLKIT_LANGUAGE = resolveMaptoolkitLanguage(import.meta.env.VITE_MAPTOOLKIT_LANGUAGE);
 
 const OPENFREEMAP_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
 const OPENFREEMAP_STYLE_URL = 'https://tiles.openfreemap.org/styles';
-
-type StyleSourceJson = {
-	type?: string;
-	url?: string;
-	tiles?: string[];
-	bounds?: number[];
-	minzoom?: number;
-	maxzoom?: number;
-	attribution?: string;
-	[key: string]: unknown;
-};
-
-type StyleLayerJson = {
-	id: string;
-	type: string;
-	source?: string;
-	'source-layer'?: string;
-	[key: string]: unknown;
-};
-
-type StyleJson = {
-	version: 8;
-	sources: Record<string, StyleSourceJson>;
-	layers: StyleLayerJson[];
-	[key: string]: unknown;
-};
 
 type OpenFreeMapTileJson = {
 	tiles?: string[];
@@ -246,22 +251,9 @@ const useOpenFreeMapVectorTiles = async (
 	return style;
 };
 
-const addHiddenAnchor = (style: StyleJson, id: string, beforeId?: string): void => {
-	if (style.layers.some((layer) => layer.id === id)) return;
-	const anchor = {
-		id,
-		type: 'background',
-		layout: { visibility: 'none' },
-		paint: { 'background-color': 'rgba(0,0,0,0)', 'background-opacity': 0 }
-	};
-	const index = beforeId ? style.layers.findIndex((layer) => layer.id === beforeId) : -1;
-	if (index < 0) style.layers.push(anchor);
-	else style.layers.splice(index, 0, anchor);
-};
-
-/** OpenFreeMap style as a CORS-enabled fallback if the Open-Meteo style host is unavailable. */
-const fallbackBasemapStyle = async (clipWater: boolean): Promise<StyleJson> => {
-	const fallbackUrl = `${OPENFREEMAP_STYLE_URL}/${appliedStyleMode === 'dark' ? 'dark' : 'positron'}`;
+/** Third choice: OpenFreeMap's own Positron / Dark style, CORS-enabled. */
+const buildOpenFreeMapStyle = async (dark: boolean, clipWater: boolean): Promise<StyleJson> => {
+	const fallbackUrl = `${OPENFREEMAP_STYLE_URL}/${dark ? 'dark' : 'positron'}`;
 	const response = await fetch(fallbackUrl);
 	if (!response.ok) throw new Error(`OpenFreeMap style HTTP ${response.status}`);
 	const style = (await response.json()) as StyleJson;
@@ -298,54 +290,196 @@ const fallbackBasemapStyle = async (clipWater: boolean): Promise<StyleJson> => {
 	return style;
 };
 
-export const getStyle = async () => {
-	const preferences = get(p);
-	appliedStyleMode = mode.current === 'dark' ? 'dark' : 'light';
-	const styleUrl = `https://static-assets.open-meteo.com/map-assets/styles/minimal-planet-maps${appliedStyleMode === 'dark' ? '-dark' : ''}${preferences.clipWater ? '-water-clip' : ''}.json`;
-	let style: StyleJson;
+/** Second choice: the Open-Meteo style, drawn from OpenFreeMap's CORS-enabled tiles. */
+const buildOpenMeteoStyle = async (dark: boolean, clipWater: boolean): Promise<StyleJson> => {
+	const styleUrl = `https://static-assets.open-meteo.com/map-assets/styles/minimal-planet-maps${dark ? '-dark' : ''}${clipWater ? '-water-clip' : ''}.json`;
 
-	try {
-		const response = await fetch(styleUrl);
-		if (!response.ok) throw new Error(`HTTP ${response.status}`);
-		style = (await response.json()) as StyleJson;
-		if (style?.version !== 8 || !style?.sources || !Array.isArray(style.layers)) {
-			throw new Error('Invalid basemap style response');
-		}
-
-		const tileJsonSource = Object.entries(style.sources).find(
-			([, source]) => typeof source.url === 'string' && source.type === 'vector'
-		);
-		if (tileJsonSource) {
-			const [sourceName, source] = tileJsonSource;
-			const sourceUrlValue = source.url;
-			if (typeof sourceUrlValue !== 'string') {
-				throw new Error('Basemap vector source has no TileJSON URL.');
-			}
-			const sourceUrl = new URL(sourceUrlValue);
-			if (sourceUrl.hostname === 'tiles.open-meteo.com') {
-				style = await useOpenFreeMapVectorTiles(style, sourceName);
-				console.info(
-					'Using OpenFreeMap CORS-enabled vector tiles with the Open-Meteo basemap style.'
-				);
-			} else {
-				const sourceResponse = await fetch(sourceUrlValue);
-				if (!sourceResponse.ok) throw new Error(`Basemap TileJSON HTTP ${sourceResponse.status}`);
-			}
-		}
-	} catch (error) {
-		if (!warnedBasemapFallback) {
-			warnedBasemapFallback = true;
-			toast.warning('Open-Meteo basemap unavailable; using OpenFreeMap instead.', {
-				id: 'basemap-fallback'
-			});
-		}
-		console.warn('Basemap style request failed; using the OpenFreeMap fallback.', error);
-		style = await fallbackBasemapStyle(preferences.clipWater);
+	const response = await fetch(styleUrl);
+	if (!response.ok) throw new Error(`HTTP ${response.status}`);
+	let style = (await response.json()) as StyleJson;
+	if (style?.version !== 8 || !style?.sources || !Array.isArray(style.layers)) {
+		throw new Error('Invalid basemap style response');
 	}
 
-	return (
-		preferences.globe ? { ...style, projection: { type: 'globe' } } : style
-	) as maplibregl.StyleSpecification;
+	const tileJsonSource = Object.entries(style.sources).find(
+		([, source]) => typeof source.url === 'string' && source.type === 'vector'
+	);
+	if (tileJsonSource) {
+		const [sourceName, source] = tileJsonSource;
+		const sourceUrlValue = source.url;
+		if (typeof sourceUrlValue !== 'string') {
+			throw new Error('Basemap vector source has no TileJSON URL.');
+		}
+		const sourceUrl = new URL(sourceUrlValue);
+		if (sourceUrl.hostname === 'tiles.open-meteo.com') {
+			style = await useOpenFreeMapVectorTiles(style, sourceName);
+			console.info(
+				'Using OpenFreeMap CORS-enabled vector tiles with the Open-Meteo basemap style.'
+			);
+		} else {
+			const sourceResponse = await fetch(sourceUrlValue);
+			if (!sourceResponse.ok) throw new Error(`Basemap TileJSON HTTP ${sourceResponse.status}`);
+		}
+	}
+	return style;
+};
+
+/**
+ * First choice: Maptoolkit's free community vector basemap. The style and its
+ * TileJSON are both checked up front, so an outage or a changed style shows up
+ * here and the next provider is used, instead of an empty map.
+ */
+const buildMaptoolkitStyle = async (
+	dark: boolean,
+	clipWater: boolean
+): Promise<{ style: StyleJson; attribution: string }> => {
+	const styleJson = await fetchJson<unknown>(maptoolkitStyleUrl(dark, MAPTOOLKIT_LANGUAGE));
+	const { style, vectorSource, sourceLayers } = prepareMaptoolkitStyle(styleJson, { clipWater });
+	const tileJsonUrl = style.sources[vectorSource].url as string;
+	const attribution = checkMaptoolkitTileJson(await fetchJson<unknown>(tileJsonUrl), sourceLayers);
+	return { style, attribution };
+};
+
+const buildBasemap = async (
+	provider: BasemapProvider,
+	dark: boolean,
+	clipWater: boolean
+): Promise<{ style: StyleJson; attribution?: string }> => {
+	switch (provider) {
+		case 'maptoolkit':
+			return buildMaptoolkitStyle(dark, clipWater);
+		case 'open-meteo':
+			return { style: await buildOpenMeteoStyle(dark, clipWater) };
+		case 'openfreemap':
+			return { style: await buildOpenFreeMapStyle(dark, clipWater) };
+	}
+};
+
+export type ResolvedBasemap = {
+	provider: BasemapProvider;
+	style: maplibregl.StyleSpecification;
+	/** Copyright text reported by the provider's own TileJSON (Maptoolkit). */
+	attribution?: string;
+};
+
+// Providers that failed (at load time or at runtime) and are skipped for a while
+const providerCooldown = new ProviderCooldown();
+
+/**
+ * Build the style of the first provider that works. A provider that fails is
+ * skipped for the next ten minutes, so switching theme or toggling Clip Water
+ * does not wait for it again.
+ */
+export const resolveBasemap = async (): Promise<ResolvedBasemap> => {
+	const preferences = get(p);
+	const dark = mode.current === 'dark';
+	appliedStyleMode = dark ? 'dark' : 'light';
+
+	const failed: BasemapProvider[] = [];
+	let lastError: unknown;
+	for (const provider of candidateProviders(PROVIDER_ORDER, providerCooldown)) {
+		try {
+			const { style, attribution } = await buildBasemap(provider, dark, preferences.clipWater);
+			for (const unavailable of failed) {
+				toast.warning(
+					`${BASEMAP_LABELS[unavailable]} basemap unavailable; using ${BASEMAP_LABELS[provider]} instead.`,
+					{ id: `basemap-fallback-${unavailable}` }
+				);
+			}
+			return {
+				provider,
+				attribution,
+				style: (preferences.globe
+					? { ...style, projection: { type: 'globe' } }
+					: style) as maplibregl.StyleSpecification
+			};
+		} catch (error) {
+			lastError = error;
+			failed.push(provider);
+			providerCooldown.markFailed(provider);
+			console.warn(`${BASEMAP_LABELS[provider]} basemap unavailable; trying the next one.`, error);
+		}
+	}
+	throw lastError ?? new Error('No basemap provider is configured.');
+};
+
+// Controls that credit the active basemap. Maptoolkit's terms require its logo
+// and an always-expanded copyright line; the other providers only need the
+// attribution their TileJSON carries, so the logo exists only while Maptoolkit
+// is the basemap.
+let activeProvider: BasemapProvider | undefined;
+let attributionControl: maplibregl.AttributionControl | undefined;
+let logoControl: LogoControl | undefined;
+
+const applyBasemapCredits = (map: maplibregl.Map, { provider, attribution }: ResolvedBasemap) => {
+	if (attributionControl) map.removeControl(attributionControl);
+	if (logoControl) map.removeControl(logoControl);
+	logoControl = undefined;
+
+	// Controls of a bottom corner stack upwards in the order they are added: the
+	// copyright line first keeps it in the corner it has always been in, and
+	// the logo sits right above it.
+	attributionControl = new maplibregl.AttributionControl(
+		attributionOptionsFor(provider, attribution)
+	);
+	map.addControl(attributionControl, 'bottom-right');
+	if (provider === 'maptoolkit') {
+		logoControl = new LogoControl();
+		map.addControl(logoControl, 'bottom-right');
+	}
+
+	activeProvider = provider;
+	document.documentElement.dataset.basemap = provider;
+};
+
+let stopBasemapWatch: (() => void) | undefined;
+
+/**
+ * A provider can answer the style request and then stop serving tiles (an
+ * outage, a rate limit). When tile requests of its vector sources keep failing
+ * and none succeeds (see OutageDetector), mark it as down and reload the style,
+ * which then picks the next provider. Only watched while a fallback exists.
+ */
+const watchBasemapHealth = (map: maplibregl.Map, { provider, style }: ResolvedBasemap) => {
+	stopBasemapWatch?.();
+	stopBasemapWatch = undefined;
+
+	const fallback = nextProvider(PROVIDER_ORDER, provider);
+	if (!fallback) return;
+	// Only the main basemap source: a secondary vector source that keeps
+	// loading would hide that the main one is down (see primaryVectorSource)
+	const primarySource = primaryVectorSource(style);
+	if (primarySource === undefined) return;
+
+	const watched = (sourceId: string | undefined): boolean => sourceId === primarySource;
+
+	const detector = new OutageDetector(() => {
+		stopBasemapWatch?.();
+		providerCooldown.markFailed(provider);
+		console.warn(`${BASEMAP_LABELS[provider]} stopped serving tiles.`);
+		toast.warning(
+			`${BASEMAP_LABELS[provider]} basemap stopped responding; switching to ${BASEMAP_LABELS[fallback]}.`,
+			{ id: `basemap-fallback-${provider}` }
+		);
+		reloadStyles();
+	});
+
+	const onData = (event: maplibregl.MapSourceDataEvent | maplibregl.MapStyleDataEvent) => {
+		// A tile of the basemap loaded: the provider is serving
+		if (event.dataType === 'source' && event.tile && watched(event.sourceId)) detector.success();
+	};
+	const onError = (event: maplibregl.ErrorEvent) => {
+		if (watched((event as { sourceId?: string }).sourceId)) detector.failure();
+	};
+
+	map.on('data', onData);
+	map.on('error', onError);
+	stopBasemapWatch = () => {
+		detector.dispose();
+		map.off('data', onData);
+		map.off('error', onError);
+		stopBasemapWatch = undefined;
+	};
 };
 
 export const terrainHandler = () => {
@@ -362,23 +496,37 @@ export const globeHandler = () => {
 	updateUrl('globe', String(preferences.globe), String(defaultPreferences.globe));
 };
 
+// A reload that is still fetching its style is dropped when a newer one starts
+let reloadSequence = 0;
+
 export const reloadStyles = () => {
-	getStyle().then((style) => {
-		const map = get(m);
-		if (!map) return;
-		map.setStyle(style);
-		map.once('styledata', () => {
-			setTimeout(() => {
-				const preferences = get(p);
-				if (preferences.hillshade) {
-					addHillshadeLayer();
-					addTerrainSource(map, 'terrainSource2');
-					if (preferences.terrain) {
-						map.setTerrain({ source: 'terrainSource2' });
+	const sequence = ++reloadSequence;
+	resolveBasemap()
+		.then((basemap) => {
+			const map = get(m);
+			if (!map || sequence !== reloadSequence) return;
+			// Light/dark of one provider is a small change that MapLibre can diff. A
+			// different provider replaces every source and layer, so reload it whole.
+			const providerChanged = basemap.provider !== activeProvider;
+			applyBasemapCredits(map, basemap);
+			map.setStyle(basemap.style, { diff: !providerChanged });
+			watchBasemapHealth(map, basemap);
+			map.once('styledata', () => {
+				setTimeout(() => {
+					const preferences = get(p);
+					if (preferences.hillshade) {
+						addHillshadeLayer();
+						addTerrainSource(map, 'terrainSource2');
+						if (preferences.terrain) {
+							map.setTerrain({ source: 'terrainSource2' });
+						}
 					}
-				}
-				addOmFileLayers();
-			}, 50);
+					addOmFileLayers();
+				}, 50);
+			});
+		})
+		.catch((error) => {
+			console.error('Could not load any basemap.', error);
+			toast.error('Could not load a basemap.', { id: 'basemap-error' });
 		});
-	});
 };

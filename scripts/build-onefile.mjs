@@ -112,6 +112,18 @@ const inlineAssets = (files) => {
 		'OM-file WebAssembly binary'
 	);
 
+	// Opened from disk, the page loads both workers as classic scripts (see the
+	// asset loader below), so neither may use ES module syntax.
+	for (const workerPath of [fileReaderWorker, maplibreWorker]) {
+		const source = readFileSync(workerPath, 'utf8');
+		if (/^\s*(?:import|export)\s*[\w{*]/m.test(source)) {
+			throw new Error(
+				`${basename(workerPath)} uses ES module syntax; it must stay a classic script so ` +
+					'the standalone HTML can run from file://.'
+			);
+		}
+	}
+
 	return {
 		fileReaderWorker,
 		maplibreWorker,
@@ -219,7 +231,17 @@ __start(__app, document.getElementById('onefile-app-root'), {
 		throw new Error('The generated standalone JavaScript still contains external module imports.');
 	}
 
-	const assetLoader = `(()=>{const bytes=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));const url=(s,type)=>URL.createObjectURL(new Blob([bytes(s)],{type}));globalThis.__OM_FILE_READER_WORKER_URL__=url("${assets.fileReaderWorkerBase64}","text/javascript");globalThis.__OM_MAPLIBRE_WORKER_URL__=url("${assets.maplibreWorkerBase64}","text/javascript");let wasmUrl;Object.defineProperty(globalThis,"__OM_WASM_URL__",{configurable:true,get(){return wasmUrl||(wasmUrl=url("${assets.wasmBase64}","application/wasm"))}})})();`;
+	// Served over http(s), workers and the WASM binary are loaded from blob: URLs.
+	// Opened from disk (file://) that fails in Chromium, which reports
+	// location.origin as "file://" but the origin of a blob: URL as "null": MapLibre
+	// and the Open-Meteo worker pool then treat the blob as cross-origin, wrap it in
+	// a second blob, and a worker on a file page cannot fetch that inner blob.
+	// data: URLs work there. MapLibre also loads any URL that does not end in
+	// ".cjs" as a module worker, which a file page cannot create at all; the
+	// worker is a classic script (checked above), so the "#.cjs" suffix selects the
+	// classic path. Both are used only when the two origins really disagree
+	// (`disk`), so browsers where they match keep the blob: URLs.
+	const assetLoader = `(()=>{const bytes=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));const disk=location.protocol==="file:"&&(()=>{const u=URL.createObjectURL(new Blob([]));try{return new URL(u).origin!==location.origin}finally{URL.revokeObjectURL(u)}})();const url=(s,type)=>disk?"data:"+type+";base64,"+s:URL.createObjectURL(new Blob([bytes(s)],{type}));globalThis.__OM_FILE_READER_WORKER_URL__=url("${assets.fileReaderWorkerBase64}","text/javascript");globalThis.__OM_MAPLIBRE_WORKER_URL__=url("${assets.maplibreWorkerBase64}","text/javascript")+(disk?"#.cjs":"");let wasmUrl;Object.defineProperty(globalThis,"__OM_WASM_URL__",{configurable:true,get(){return wasmUrl||(wasmUrl=url("${assets.wasmBase64}","application/wasm"))}})})();`;
 	const safeModuleCode = moduleCode.replace(/<\/script/gi, '\\x3C/script');
 	if (/<\/script/i.test(safeModuleCode)) {
 		throw new Error('The standalone JavaScript still contains an unescaped script-closing tag.');

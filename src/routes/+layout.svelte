@@ -33,6 +33,12 @@
 		if (metaDataInterval) clearInterval(metaDataInterval);
 	});
 
+	// Above the time selector (85px), and above the map credits when those are
+	// raised or tall: Maptoolkit's terms do not allow a popup to cover them.
+	// The two properties are maintained by attribution.ts and styles.css.
+	const toastBottomOffset =
+		'max(85px, calc(var(--om-credit-bottom) + var(--om-credit-height) + 8px))';
+
 	// `updated` flips once the polled _app/version.json reports a newer build
 	// (see svelte.config.js); it never flips back, so this fires at most once.
 	$effect(() => {
@@ -48,8 +54,8 @@
 <Toaster
 	closeButton={true}
 	richColors={true}
-	offset={{ bottom: '85px', right: '10px' }}
-	mobileOffset={{ bottom: '85px' }}
+	offset={{ bottom: toastBottomOffset, right: '10px' }}
+	mobileOffset={{ bottom: toastBottomOffset }}
 />
 
 {@render children()}

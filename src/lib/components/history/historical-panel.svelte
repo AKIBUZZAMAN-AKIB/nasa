@@ -263,7 +263,8 @@
 
 	<aside
 		transition:fly={{ y: 12, duration: 200 }}
-		class="absolute right-2 bottom-[7.5rem] z-50 flex max-h-[70dvh] w-[min(92vw,26rem)] flex-col overflow-hidden rounded-lg bg-glass/90 shadow-lg backdrop-blur-md md:right-2"
+		class="absolute right-2 z-50 flex max-h-[70dvh] w-[min(92vw,26rem)] flex-col overflow-hidden rounded-lg bg-glass/90 shadow-lg backdrop-blur-md md:right-2"
+		style:bottom="max(7.5rem, calc(var(--om-credit-bottom) + var(--om-credit-height) + 0.5rem))"
 	>
 		<header class="flex items-center justify-between border-b px-3 py-2">
 			<div class="min-w-0">

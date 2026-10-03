@@ -112,7 +112,9 @@
 </button>
 
 {#if $replayOpen}
+	<!-- data-credit-blocker: attribution.ts keeps the map credits above this bar -->
 	<div
+		data-credit-blocker
 		class="absolute bottom-full left-1/2 z-50 mb-2 w-[min(94vw,52rem)] -translate-x-1/2 space-y-1.5 rounded-lg bg-glass/90 p-2 text-[0.7rem] shadow-lg backdrop-blur-md"
 	>
 		<!-- Interval -->
