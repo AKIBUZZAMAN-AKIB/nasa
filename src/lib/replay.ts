@@ -16,14 +16,18 @@ import {
 	type GibsLayerDef,
 	type GibsPeriod,
 	type GibsTimeRange,
+	describeGibsPeriod,
+	gibsPeriodMilliseconds,
+	isSubdailyGibsPeriod,
 	isoDayDiff,
 	normalizeGibsTimestamp,
 	resolveAvailableDay,
 	resolveAvailableTime,
-	shiftIsoDay
+	shiftIsoDay,
+	shiftIsoMonth
 } from './gibs';
 
-export type ReplayStep = '30m' | '1h' | '3h' | '6h' | '1d' | '3d' | '7d' | '16d' | '1M';
+export type ReplayStep = 'native' | '30m' | '1h' | '3h' | '6h' | '1d' | '3d' | '7d' | '16d' | '1M';
 
 export interface ReplayStepDef {
 	value: ReplayStep;
@@ -35,6 +39,7 @@ export interface ReplayStepDef {
 }
 
 export const REPLAY_STEPS: ReplayStepDef[] = [
+	{ value: 'native', label: 'Native cadence', hours: 0, days: 0 },
 	{ value: '30m', label: '30 minutes', hours: 0.5, days: 1 / 48 },
 	{ value: '1h', label: '1 hour', hours: 1, days: 1 },
 	{ value: '3h', label: '3 hours', hours: 3, days: 1 },
@@ -56,13 +61,50 @@ export const stepLabel = (step: ReplayStep): string => replayStepDef(step).label
 export const isHourlyStep = (step: ReplayStep): boolean =>
 	step === '1h' || step === '3h' || step === '6h';
 
-/** Steps the layer can show without repeating a coarser composite. */
-export const stepsForLayer = (layer: GibsLayerDef): ReplayStep[] => {
-	if (layer.period === 'PT30M') return ['30m', '1h', '3h', '6h', '1d', '3d', '7d', '16d', '1M'];
-	if (layer.period === 'P1M') return ['1M', '16d', '7d'];
-	if (layer.period === 'P16D') return ['16d', '1M', '7d'];
-	return ['1d', '3d', '7d', '16d', '1M'];
+const approximatePeriodMilliseconds = (period: GibsPeriod): number | undefined => {
+	const subdaily = gibsPeriodMilliseconds(period);
+	if (subdaily !== undefined) return subdaily;
+	const match = /^P(\d+)(D|M|Y)$/.exec(period);
+	if (!match) return undefined;
+	const count = Number(match[1]);
+	return (
+		count *
+		(match[2] === 'D' ? 86_400_000 : match[2] === 'M' ? 30 * 86_400_000 : 365.25 * 86_400_000)
+	);
 };
+
+const replayStepMilliseconds = (step: ReplayStep): number => {
+	if (step === 'native') return 0;
+	const definition = replayStepDef(step);
+	return definition.hours ? definition.hours * 3_600_000 : definition.days * 86_400_000;
+};
+
+/** Steps at least as coarse as the layer cadence; native covers unusual periods. */
+export const stepsForLayer = (layer: GibsLayerDef): ReplayStep[] => {
+	if (layer.period === 'static') return [];
+	const nativeMs = approximatePeriodMilliseconds(layer.period);
+	const candidates = [
+		'30m',
+		'1h',
+		'3h',
+		'6h',
+		'1d',
+		'3d',
+		'7d',
+		'16d',
+		'1M'
+	] as const satisfies readonly ReplayStep[];
+	if (!nativeMs) return ['1d', '3d', '7d', '16d', '1M'];
+	const coarseEnough = candidates.filter((step) => replayStepMilliseconds(step) >= nativeMs);
+	const exactCadence = coarseEnough.some(
+		(step) => Math.abs(replayStepMilliseconds(step) - nativeMs) < 1000
+	);
+	return exactCadence ? coarseEnough : ['native', ...coarseEnough];
+};
+
+/** Describe the special native option with the actual layer cadence. */
+export const stepLabelForLayer = (step: ReplayStep, layer?: GibsLayerDef): string =>
+	step === 'native' && layer ? `${describeGibsPeriod(layer.period)} (native)` : stepLabel(step);
 
 export type ReplayMode = 'forecast' | 'satellite';
 export type ReplayFrame = string;
@@ -87,9 +129,46 @@ export const satelliteFrames = (
 	layer?: GibsLayerDef
 ): ReplayFrame[] => {
 	if (!ranges.length || from > to) return [];
+	if (step === 'native') {
+		const nativeFrames = new Set<string>();
+		for (const range of ranges) {
+			const lower = from > range.start ? from : range.start;
+			const upper = to < range.end ? to : range.end;
+			if (lower > upper) continue;
+			const monthMatch = /^P(\d+)(M|Y)$/.exec(range.step);
+			let candidate: string;
+			let incrementMonths = 0;
+			let incrementDays = 0;
+			if (monthMatch) {
+				incrementMonths = Number(monthMatch[1]) * (monthMatch[2] === 'Y' ? 12 : 1);
+				const startMonth = new Date(`${range.start.slice(0, 7)}-01T00:00:00Z`);
+				const lowerMonth = new Date(`${lower.slice(0, 7)}-01T00:00:00Z`);
+				const monthsApart =
+					(lowerMonth.getUTCFullYear() - startMonth.getUTCFullYear()) * 12 +
+					lowerMonth.getUTCMonth() -
+					startMonth.getUTCMonth();
+				candidate = shiftIsoMonth(
+					range.start,
+					Math.max(0, Math.ceil(monthsApart / incrementMonths) * incrementMonths)
+				);
+			} else {
+				incrementDays = Math.max(1, range.stepDays || 1);
+				const daysApart = Math.max(0, isoDayDiff(range.start, lower));
+				candidate = shiftIsoDay(range.start, Math.ceil(daysApart / incrementDays) * incrementDays);
+			}
+			while (candidate <= upper) {
+				const resolved = layer ? resolveAvailableDay(layer, candidate, [range]) : candidate;
+				if (resolved) nativeFrames.add(resolved);
+				candidate = incrementMonths
+					? shiftIsoMonth(candidate, incrementMonths)
+					: shiftIsoDay(candidate, incrementDays);
+			}
+		}
+		return [...nativeFrames].sort();
+	}
 	const days = replayStepDef(step).days;
-	// Sub-day steps are only meaningful on PT30M layers; never let a date-only
-	// layer spin forever when given a malformed or stale fine-cadence setting.
+	// Sub-day strides belong to time-dimension layers and are handled by
+	// `subdailyFrames`; don't let a stale setting spin a date-only archive.
 	if (!Number.isFinite(days) || days < 1) return [];
 	const frames: ReplayFrame[] = [];
 	let previous: string | undefined;
@@ -181,7 +260,23 @@ export const subdailyFrames = (
 	};
 	const availableStep = Math.min(...ranges.map((range) => range.stepMs));
 
-	if (step === '1M') {
+	if (step === 'native') {
+		for (const range of ranges) {
+			const rangeStart = Date.parse(range.start);
+			const rangeEnd = Date.parse(range.end);
+			const lower = Math.max(start, rangeStart);
+			const upper = Math.min(end, rangeEnd);
+			if (lower > upper) continue;
+			const firstIndex = Math.max(0, Math.ceil((lower - rangeStart) / range.stepMs));
+			for (
+				let candidate = rangeStart + firstIndex * range.stepMs;
+				candidate <= upper;
+				candidate += range.stepMs
+			) {
+				if (!add(formatUtcInstant(candidate))) return { frames: [], limitExceeded: true };
+			}
+		}
+	} else if (step === '1M') {
 		for (let candidate = start; candidate <= end; candidate = shiftUtcMonth(candidate, 1)) {
 			const resolved = resolveAvailableTime(ranges, formatUtcInstant(candidate));
 			if (!resolved) continue;
@@ -205,10 +300,17 @@ export const subdailyFrames = (
 
 			let index = Math.max(0, Math.ceil((lower - start) / strideMs));
 			let candidate = start + index * strideMs;
-			// Both the requested cadence and native cadence are UTC intervals.
-			// Skip a misaligned candidate instead of letting GIBS silently snap it.
+			// Keep the requested pace while rounding to the nearest real native
+			// frame. This also handles irregular intervals such as PT59M41S.
 			while (candidate <= upper) {
-				if ((candidate - rangeStart) % range.stepMs === 0 && !add(formatUtcInstant(candidate)))
+				const nativeIndex = Math.round((candidate - rangeStart) / range.stepMs);
+				const aligned = rangeStart + nativeIndex * range.stepMs;
+				if (
+					aligned >= lower &&
+					aligned <= upper &&
+					Math.abs(aligned - candidate) <= range.stepMs / 2 &&
+					!add(formatUtcInstant(aligned))
+				)
 					return { frames: [], limitExceeded: true };
 				index += 1;
 				candidate = start + index * strideMs;
@@ -385,41 +487,56 @@ export const replayPresets = (options: {
 		}
 	];
 
-	if (temporalResolution === 'PT30M') {
+	if (temporalResolution && isSubdailyGibsPeriod(temporalResolution)) {
+		const nativeMs = gibsPeriodMilliseconds(temporalResolution) ?? 30 * 60_000;
 		const latestFrame = latestTime ?? `${last}T23:30:00Z`;
 		const latestMs = Date.parse(latestFrame);
 		const atUtcTime = latestFrame.slice(10);
 		const shiftFrame = (minutes: number): string =>
 			new Date(latestMs + minutes * 60_000).toISOString().replace('.000Z', 'Z');
+		const standardSteps: ReplayStep[] = ['30m', '1h', '3h', '6h', '1d'];
+		const stepDuration = (step: ReplayStep): number =>
+			step === 'native' ? nativeMs : replayStepMilliseconds(step);
+		const exactNativeStep = standardSteps.find(
+			(step) => Math.abs(stepDuration(step) - nativeMs) < 1000
+		);
+		const nativeStep: ReplayStep = exactNativeStep ?? 'native';
+		const hourlyStep =
+			standardSteps.find(
+				(step) => ['1h', '3h', '6h', '1d'].includes(step) && stepDuration(step) >= nativeMs
+			) ?? 'native';
+		const monthStep: ReplayStep = nativeMs <= 6 * 60 * 60_000 ? '6h' : '1d';
+		const cadenceName = describeGibsPeriod(temporalResolution);
+
 		presets.push(
 			{
 				id: 'satellite-24h',
-				label: 'Last 24 hours · 30 min',
-				hint: 'Every available 30-minute IMERG frame in the latest day',
+				label: `Last 24 hours · ${nativeStep === 'native' ? cadenceName : stepLabel(nativeStep)}`,
+				hint: `Every available native ${cadenceName} frame in the latest day`,
 				mode: 'satellite',
 				from: shiftFrame(-24 * 60),
 				to: latestFrame,
-				step: '30m'
+				step: nativeStep
 			},
 			{
 				id: 'satellite-week',
-				label: 'Last 7 days · hourly',
-				hint: 'Hourly samples of the most recent seven days of IMERG',
+				label: `Last 7 days · ${stepLabel(hourlyStep)}`,
+				hint: `Sample the most recent seven days at ${stepLabel(hourlyStep).toLowerCase()} cadence`,
 				mode: 'satellite',
 				from: shiftFrame(-7 * 24 * 60),
 				to: latestFrame,
-				step: '1h'
+				step: hourlyStep
 			}
 		);
 
 		for (const preset of presets) {
 			switch (preset.id) {
 				case 'satellite-month':
-					preset.label = 'Last 30 days · 6-hour';
-					preset.hint = 'Six-hour samples across the latest 30 days';
+					preset.label = `Last 30 days · ${stepLabel(monthStep)}`;
+					preset.hint = `Samples across the latest 30 days at ${stepLabel(monthStep).toLowerCase()} cadence`;
 					preset.from = shiftFrame(-29 * 24 * 60);
 					preset.to = latestFrame;
-					preset.step = '6h';
+					preset.step = monthStep;
 					break;
 				case 'satellite-monsoon':
 					preset.label = 'Monsoon · daily';
@@ -435,10 +552,43 @@ export const replayPresets = (options: {
 					break;
 				case 'satellite-all':
 					preset.label = 'Whole archive · monthly';
-					preset.hint = 'One frame per month across the half-hourly record';
+					preset.hint = `One frame per month across the ${cadenceName} record`;
 					preset.from = `${coverageStart ?? `${year}-01-01`}${atUtcTime}`;
 					preset.to = latestFrame;
 					break;
+			}
+		}
+	} else if (temporalResolution) {
+		const nativeMs = approximatePeriodMilliseconds(temporalResolution);
+		if (nativeMs !== undefined && nativeMs > 86_400_000) {
+			const candidates: ReplayStep[] = ['1d', '3d', '7d', '16d', '1M'];
+			const cadenceStep =
+				candidates.find((step) => Math.abs(replayStepMilliseconds(step) - nativeMs) < 1000) ??
+				'native';
+			const cadenceName = describeGibsPeriod(temporalResolution);
+			for (const preset of presets) {
+				switch (preset.id) {
+					case 'satellite-month':
+						preset.label = `Last 30 days · ${cadenceName}`;
+						preset.hint = `Show frames at the layer's ${cadenceName} cadence`;
+						preset.step = cadenceStep;
+						break;
+					case 'satellite-monsoon':
+						preset.label = `Monsoon · ${cadenceName}`;
+						preset.hint = `Show available frames at the layer's ${cadenceName} cadence during monsoon`;
+						preset.step = cadenceStep;
+						break;
+					case 'satellite-year':
+						preset.label = `This year · ${cadenceName}`;
+						preset.hint = `Show available frames at the layer's ${cadenceName} cadence this year`;
+						preset.step = cadenceStep;
+						break;
+					case 'satellite-all':
+						preset.label = `Whole archive · ${cadenceName}`;
+						preset.hint = `Walk the full archive at its native ${cadenceName} cadence`;
+						preset.step = cadenceStep;
+						break;
+				}
 			}
 		}
 	}

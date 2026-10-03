@@ -34,12 +34,18 @@
 	} from '$lib/stores/replay';
 
 	import { MILLISECONDS_PER_WEEK } from '$lib/constants';
-	import { gibsLayerById } from '$lib/gibs';
+	import {
+		gibsLayerById,
+		gibsLayerCanRender,
+		gibsPeriodMilliseconds,
+		isSubdailyGibsLayer
+	} from '$lib/gibs';
 	import { gibsImagery } from '$lib/gibs-layers';
 	import {
 		MAX_SUBDAILY_REPLAY_FRAMES,
 		REPLAY_STEPS,
 		formatReplayDay,
+		stepLabelForLayer,
 		stepsForLayer
 	} from '$lib/replay';
 
@@ -54,7 +60,15 @@
 			? (availability.ranges[0]?.start ?? layer?.coverageStart)
 			: forecastStart
 	);
-	const timeAware = $derived($replayMode === 'satellite' && layer?.period === 'PT30M');
+	const timeAware = $derived($replayMode === 'satellite' && isSubdailyGibsLayer(layer));
+	const archivePlaybackBlocked = $derived(
+		$replayMode === 'satellite' &&
+			!!layer &&
+			(layer.period === 'static' || !gibsLayerCanRender(layer))
+	);
+	const timeStepSeconds = $derived(
+		Math.max(1, Math.round((gibsPeriodMilliseconds(layer?.period) ?? 30 * 60_000) / 1000))
+	);
 	const availableSteps = $derived(
 		$replayMode === 'satellite' && layer
 			? REPLAY_STEPS.filter((step) => stepsForLayer(layer).includes(step.value))
@@ -66,7 +80,10 @@
 		if (!value) return '';
 		const date = new Date(value);
 		if (!Number.isFinite(date.getTime())) return '';
-		return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+		const precision = timeAware && timeStepSeconds % 60 !== 0 ? 19 : 16;
+		return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+			.toISOString()
+			.slice(0, precision);
 	};
 	const fromLocalInput = (value: string): string | undefined => {
 		if (!value) return undefined;
@@ -76,9 +93,9 @@
 	const timestampBound = (value?: string, endOfDay = false): string | undefined => {
 		if (!value) return undefined;
 		if (value.includes('T')) return value;
-		// A day-only brush edge means the whole UTC day, represented in the
-		// datetime-local control by its first or last native half-hour frame.
-		return `${value}T${endOfDay ? '23:30:00' : '00:00:00'}Z`;
+		// A date-only endpoint spans the whole UTC day; exact layer cadence is
+		// snapped later against the compact DescribeDomains time ranges.
+		return `${value}T${endOfDay ? '23:59:59' : '00:00:00'}Z`;
 	};
 	const rangeInputValue = (value?: string, endOfDay = false): string =>
 		timeAware ? toLocalInput(timestampBound(value, endOfDay)) : (value?.slice(0, 10) ?? '');
@@ -138,6 +155,18 @@
 					{$replayMode === 'satellite' ? 'satellite archive' : 'forecast run'}
 				</span>
 			</span>
+			{#if archivePlaybackBlocked}
+				<span
+					class="basis-full rounded bg-amber-500/10 px-2 py-1 text-amber-900 dark:text-amber-100"
+				>
+					{#if layer?.period === 'static'}
+						This layer is timeless and has no satellite frames to replay.
+					{:else}
+						This polar-only layer cannot be replayed on the Web Mercator map.
+					{/if}
+					Choose a different GIBS layer or one of the forecast presets.
+				</span>
+			{/if}
 			<button
 				class="rounded p-0.5 hover:bg-black/10 dark:hover:bg-white/15"
 				onclick={toggleReplayOpen}
@@ -149,61 +178,70 @@
 
 		<!-- Range and cadence, edited by hand -->
 		<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-			<label class="flex items-center gap-1">
-				<span class="opacity-70">From{timeAware ? ' (local)' : ''}</span>
-				<input
-					type={timeAware ? 'datetime-local' : 'date'}
-					step={timeAware ? 1800 : undefined}
-					class="h-6 rounded border bg-transparent px-1"
-					min={rangeInputBound(timeAware ? availability.timeRanges[0]?.start : minDay)}
-					max={rangeInputBound(
-						timeAware ? ($replayTo ?? $gibsLatestTime) : ($replayTo ?? $gibsLatestDate),
-						true
-					)}
-					value={rangeInputValue($replayFrom)}
-					onchange={(event) => onFrom(event.currentTarget.value)}
-				/>
-			</label>
-			<label class="flex items-center gap-1">
-				<span class="opacity-70">to{timeAware ? ' (local)' : ''}</span>
-				<input
-					type={timeAware ? 'datetime-local' : 'date'}
-					step={timeAware ? 1800 : undefined}
-					class="h-6 rounded border bg-transparent px-1"
-					min={rangeInputBound($replayFrom ?? minDay)}
-					max={rangeInputBound(timeAware ? $gibsLatestTime : $gibsLatestDate)}
-					value={rangeInputValue($replayTo, true)}
-					onchange={(event) => onTo(event.currentTarget.value)}
-				/>
-			</label>
-			<label class="flex items-center gap-1">
-				<span class="opacity-70">every</span>
-				<select
-					class="h-6 rounded border bg-transparent px-1"
-					value={$replayStep}
-					onchange={(event) => onStep(event.currentTarget.value)}
-				>
-					{#each availableSteps as step (step.value)}
-						<option value={step.value}>{step.label}</option>
-					{/each}
-				</select>
-			</label>
-			<span class="opacity-70">{$replaySummary}</span>
-			{#if timeAware}
-				<span class="opacity-60" title="Frame timestamps and map labels use UTC">
-					Local input · frame labels in UTC
+			{#if archivePlaybackBlocked}
+				<span class="opacity-70">
+					Satellite playback is unavailable for this selection; choose a compatible temporal layer
+					or apply a forecast preset.
 				</span>
-			{/if}
-			{#if $replayFrameLimitExceeded}
-				<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-800 dark:text-amber-200">
-					Range exceeds {MAX_SUBDAILY_REPLAY_FRAMES.toLocaleString()} frames; choose a coarser interval
-					or shorter range.
-				</span>
-			{/if}
-			{#if $replayMode === 'satellite' && $replayFrom && $replayTo}
-				<span class="hidden opacity-60 sm:inline">
-					{formatReplayDay($replayFrom)} → {formatReplayDay($replayTo)}
-				</span>
+			{:else}
+				<label class="flex items-center gap-1">
+					<span class="opacity-70">From{timeAware ? ' (local)' : ''}</span>
+					<input
+						type={timeAware ? 'datetime-local' : 'date'}
+						step={timeAware ? timeStepSeconds : undefined}
+						class="h-6 rounded border bg-transparent px-1"
+						min={rangeInputBound(timeAware ? availability.timeRanges[0]?.start : minDay)}
+						max={rangeInputBound(
+							timeAware ? ($replayTo ?? $gibsLatestTime) : ($replayTo ?? $gibsLatestDate),
+							true
+						)}
+						value={rangeInputValue($replayFrom)}
+						onchange={(event) => onFrom(event.currentTarget.value)}
+					/>
+				</label>
+				<label class="flex items-center gap-1">
+					<span class="opacity-70">to{timeAware ? ' (local)' : ''}</span>
+					<input
+						type={timeAware ? 'datetime-local' : 'date'}
+						step={timeAware ? timeStepSeconds : undefined}
+						class="h-6 rounded border bg-transparent px-1"
+						min={rangeInputBound($replayFrom ?? minDay)}
+						max={rangeInputBound(timeAware ? $gibsLatestTime : $gibsLatestDate)}
+						value={rangeInputValue($replayTo, true)}
+						onchange={(event) => onTo(event.currentTarget.value)}
+					/>
+				</label>
+				<label class="flex items-center gap-1">
+					<span class="opacity-70">every</span>
+					<select
+						class="h-6 rounded border bg-transparent px-1"
+						value={$replayStep}
+						onchange={(event) => onStep(event.currentTarget.value)}
+					>
+						{#each availableSteps as step (step.value)}
+							<option value={step.value}>
+								{stepLabelForLayer(step.value, $replayMode === 'satellite' ? layer : undefined)}
+							</option>
+						{/each}
+					</select>
+				</label>
+				<span class="opacity-70">{$replaySummary}</span>
+				{#if timeAware}
+					<span class="opacity-60" title="Frame timestamps and map labels use UTC">
+						Local input · frame labels in UTC
+					</span>
+				{/if}
+				{#if $replayFrameLimitExceeded}
+					<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-800 dark:text-amber-200">
+						Range exceeds {MAX_SUBDAILY_REPLAY_FRAMES.toLocaleString()} frames; choose a coarser interval
+						or shorter range.
+					</span>
+				{/if}
+				{#if $replayMode === 'satellite' && $replayFrom && $replayTo}
+					<span class="hidden opacity-60 sm:inline">
+						{formatReplayDay($replayFrom)} → {formatReplayDay($replayTo)}
+					</span>
+				{/if}
 			{/if}
 		</div>
 

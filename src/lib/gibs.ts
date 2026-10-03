@@ -1,77 +1,131 @@
 /**
  * NASA GIBS (Global Imagery Browse Services) catalogue and date logic.
  *
- * The forecast layers of this app come from the Open-Meteo data pipeline,
- * which only keeps roughly the last week of model runs. GIBS serves the same
- * kind of raster imagery straight from NASA's EOSDIS archive instead: every
- * layer is a WMTS tile service with a `{Time}` dimension and **no API key**,
- * so imagery from 1980 onwards can be shown on the map by only changing the
- * date in the tile URL.
+ * The hand-curated layer definitions below are retained as richer quick picks,
+ * then merged with a generated snapshot of the four official WMTS `/all`
+ * Capabilities documents (Best Available, standard, and NRT variants). The
+ * snapshot makes the complete WMTS catalogue immediately searchable;
+ * per-layer temporal coverage is still resolved live through DescribeDomains.
  *
- * Everything in this module is pure: catalogue data, URL builders and the
- * date arithmetic (snapping a requested day to a layer's real cadence, and
- * finding the nearest day that actually has imagery). The map wiring lives in
- * `$lib/gibs-layers`, the UI state in `$lib/stores/gibs`.
- *
- * Sources, verified live against
- * https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/WMTSCapabilities.xml:
- *  - tile template   `${base}/{LAYER}/default/{Time}/{TileMatrixSet}/{z}/{y}/{x}.{ext}`
- *  - available dates `${base}/1.0.0/{LAYER}/default/{TileMatrixSet}/all/{start}--{end}.xml`
- *  - metadata        `https://gibs.earthdata.nasa.gov/layer-metadata/v1.0/{LAYER}.json`
- * All three answer with `Access-Control-Allow-Origin: *`, so they are usable
- * directly from the browser.
+ * The map itself is MapLibre/Web Mercator (EPSG:3857). Raster WMTS layers use
+ * their native Web-Mercator tiles; vector products are requested as the NASA
+ * default-styled WMS raster (GIBS's WMTS vector tiles are not a reliable
+ * EPSG:3857 source); polar-only products stay discoverable but are explicitly
+ * marked as not renderable in this map.
  */
+import gibsCatalogSnapshot from './gibs-catalog.generated.json';
 
 /** Key-free, CORS-enabled WMTS endpoint in Web Mercator (matches MapLibre). */
-export const GIBS_BASE_URL = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best';
+export const GIBS_BASE_URL = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/all';
+
+export const GIBS_WMTS_BASE_URLS = {
+	epsg3857: GIBS_BASE_URL,
+	epsg4326: 'https://gibs.earthdata.nasa.gov/wmts/epsg4326/all',
+	epsg3413: 'https://gibs.earthdata.nasa.gov/wmts/epsg3413/all',
+	epsg3031: 'https://gibs.earthdata.nasa.gov/wmts/epsg3031/all'
+} as const;
+
+/** `WMS/epsg4326` supports vector products returned as images in EPSG:3857. */
+export const GIBS_VECTOR_WMS_URL = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/all/wms.cgi';
 
 /** Credit required by the GIBS terms of use, added to the raster source. */
 export const GIBS_ATTRIBUTION = 'NASA GIBS / EOSDIS';
 
-/** Categories group the picker; the order here is the order in the UI. */
+/** Categories group the selector; the order here is the order in the UI. */
 export const GIBS_CATEGORIES = [
-	{ id: 'imagery', label: 'Imagery' },
+	{ id: 'imagery', label: 'Imagery & reflectance' },
 	{ id: 'flood', label: 'Floods & water' },
 	{ id: 'precipitation', label: 'Precipitation' },
-	{ id: 'temperature', label: 'Temperature' },
+	{ id: 'temperature', label: 'Temperature & thermal' },
 	{ id: 'aerosol', label: 'Aerosol & air quality' },
+	{ id: 'atmosphere', label: 'Atmosphere & clouds' },
 	{ id: 'land', label: 'Land & vegetation' },
-	{ id: 'ocean', label: 'Ocean' }
+	{ id: 'ocean', label: 'Ocean & coasts' },
+	{ id: 'cryosphere', label: 'Ice & snow' },
+	{ id: 'hazards', label: 'Hazards & fires' },
+	{ id: 'topography', label: 'Elevation & terrain' },
+	{ id: 'biodiversity', label: 'Biodiversity' },
+	{ id: 'other', label: 'Other' }
 ] as const;
 
 export type GibsCategory = (typeof GIBS_CATEGORIES)[number]['id'];
+export type GibsProjection = 'epsg3857' | 'epsg4326' | 'epsg3413' | 'epsg3031';
+export type GibsMapSupport = 'wmts-raster' | 'wms-rasterized-vector' | 'projection-only';
 
-/**
- * Temporal cadence of a layer. Daily layers accept any day inside an
- * availability range; 16-day and monthly layers change only at their composite
- * cadence; PT30M layers require an exact UTC timestamp resolved to a published
- * half-hour frame.
- */
-export type GibsPeriod = 'P1D' | 'P16D' | 'P1M' | 'PT30M';
+/** ISO-8601 durations published by GIBS, or `static` for timeless layers. */
+export type GibsPeriod = string;
+
+/** NASA CMR source product associated with a Worldview/GIBS visualization. */
+export interface GibsSourceProduct {
+	id: string;
+	shortName?: string;
+	title?: string;
+	version?: string;
+	type?: string;
+}
 
 export interface GibsLayerDef {
 	/** GIBS layer identifier (also the Worldview layer id). */
 	id: string;
 	/** Official GIBS title. */
 	title: string;
-	/** Platform / sensor, e.g. `Terra / MODIS`. */
+	/** Platform / sensor, e.g. `Terra / MODIS`; from the official Worldview catalog. */
 	subtitle: string;
+	/** Official Worldview measurement and product-group labels. */
+	layerGroup?: string | string[];
+	productGroup?: string;
+	/** Official search tags and source science products. */
+	searchTags?: string[];
+	dataProducts?: GibsSourceProduct[];
+	/** Exact Worldview config ID, when this WMTS ID is included in its layer picker. */
+	worldviewLayerId?: string;
 	category: GibsCategory;
+	/** ISO cadence such as `P1D`, `P8D`, `P1M`, `PT10M`, or `static`. */
 	period: GibsPeriod;
-	/** Lowest-resolution TileMatrixSet the layer is published on. */
+	/** TileMatrixSet used by the map service for this layer. */
 	tileMatrixSet: string;
-	/** Native ground resolution of the underlying product. */
+	/** GIBS imagery pixel resolution; not the projected map's maximum zoom. */
 	resolution: string;
-	/** Source dataset short name and version (from GIBS layer metadata). */
+	/** Matrix set and projection used to determine the imagery-resolution label. */
+	resolutionMatrixSet?: string;
+	resolutionProjection?: GibsProjection;
+	/** Source dataset short name and version (from curated GIBS metadata). */
 	dataset?: string;
-	/** First day with imagery, verified from the GIBS availability dimension (ISO `YYYY-MM-DD`). */
+	/** Earliest date shown by the Capabilities snapshot (for UI fallback only). */
 	coverageStart: string;
-	/** Colour-bar SVG published by GIBS, shown under the map controls. */
+	/** Colour-bar or vector legend published by GIBS. */
 	legend?: string;
 	/** Extra guidance for interpreting the layer. */
 	note?: string;
-	/** `png` keeps transparency (data layers); `jpg` is for imagery. */
-	extension: 'png' | 'jpg';
+	/** Extension used by the curated WMTS URL builder. */
+	extension: string;
+	/** Primary official advertised MIME type. */
+	format?: string;
+	/** Every response format advertised in the official WMTS capabilities. */
+	formats?: string[];
+	/** Tile URL template normalized to the placeholders MapLibre expects. */
+	tileTemplate?: string;
+	/** Projections in which this layer appears in the official WMTS catalogue. */
+	availableProjections?: GibsProjection[];
+	/** Projection of the selected/native catalogue entry. */
+	projection?: GibsProjection;
+	/** How this layer is safely rendered, or why it cannot be rendered here. */
+	mapSupport?: GibsMapSupport;
+	/** Projection and matrix set used for DescribeDomains availability requests. */
+	availabilityProjection?: GibsProjection;
+	availabilityTileMatrixSet?: string;
+	/** Whether the official WMTS document publishes a Time dimension. */
+	timeDimension?: boolean;
+	/** Default frame published by GIBS, when the layer has a Time dimension. */
+	defaultTime?: string;
+	/** Earliest date sent to DescribeDomains; the live response provides actual coverage. */
+	availabilityStart?: string;
+	/** Layer, colormap and vector metadata URLs from the official Capabilities. */
+	metadataUrl?: string;
+	colormapUrl?: string;
+	vectorStyleUrl?: string;
+	vectorMetadataUrl?: string;
+	abstract?: string;
 }
 
 /**
@@ -495,21 +549,308 @@ export const GIBS_LAYERS: GibsLayerDef[] = [
 	}
 ];
 
-/** Look up a catalogue entry by its GIBS identifier. */
-export const gibsLayerById = (id: string | null | undefined): GibsLayerDef | undefined =>
-	GIBS_LAYERS.find((layer) => layer.id === id);
+interface GibsCatalogSnapshotLayer {
+	id: string;
+	title: string;
+	abstract?: string | null;
+	projections: GibsProjection[];
+	projection: GibsProjection;
+	mapSupport: GibsMapSupport;
+	format: string;
+	formats: string[];
+	tileMatrixSet: string;
+	resolutionMatrixSet?: string;
+	resolutionProjection?: GibsProjection;
+	extension: string;
+	timeDimension: boolean;
+	period: string;
+	defaultTime?: string | null;
+	coverageStart: string;
+	availabilityProjection: GibsProjection;
+	availabilityTileMatrixSet: string;
+	legendUrl?: string | null;
+	metadataUrl?: string | null;
+	colormapUrl?: string | null;
+	vectorStyleUrl?: string | null;
+	vectorMetadataUrl?: string | null;
+	tileTemplate?: string | null;
+	subtitle?: string;
+	layerGroup?: string | string[];
+	productGroup?: string;
+	searchTags?: string[];
+	dataProducts?: GibsSourceProduct[];
+	worldviewLayerId?: string;
+}
 
-/** Layers of one category, in catalogue order. */
-export const gibsLayersByCategory = (category: GibsCategory): GibsLayerDef[] =>
-	GIBS_LAYERS.filter((layer) => layer.category === category);
+interface GibsCatalogSnapshot {
+	generatedAt: string;
+	sources: Record<GibsProjection, string>;
+	worldviewCatalog?: {
+		url: string;
+		lastModified?: string | null;
+		buildDate?: number | null;
+	};
+	layers: GibsCatalogSnapshotLayer[];
+}
+
+const CATALOG_SNAPSHOT = gibsCatalogSnapshot as GibsCatalogSnapshot;
+export const GIBS_CATALOG_SNAPSHOT_DATE = CATALOG_SNAPSHOT.generatedAt;
+export const GIBS_WORLDVIEW_CATALOG_LAST_MODIFIED =
+	CATALOG_SNAPSHOT.worldviewCatalog?.lastModified ?? undefined;
+
+const categoryFromMetadata = (id: string, title: string, extra = ''): GibsCategory => {
+	const text = `${id} ${title} ${extra}`.toLowerCase().replace(/[_-]+/g, ' ');
+	if (
+		/thermal anomal|wildfire|fire radiative|\bfire\b|cyclone hazard|volcano hazard|lightning|tropical storm|dust storm/.test(
+			text
+		)
+	)
+		return 'hazards';
+	if (/flood|river discharge|surface water|water mask|reservoir|dam\b|\bwater\b/.test(text))
+		return 'flood';
+	if (
+		/sea ice|\bice\b|snow|glacier|ice sheet|greenland|antarctica|cryosphere|freeze thaw/.test(text)
+	)
+		return 'cryosphere';
+	if (/precip|rainfall|rain rate|rain rate|\brain\b/.test(text)) return 'precipitation';
+	if (/temperature|\btemp\b|thermal infrared|brightness temp/.test(text)) return 'temperature';
+	if (
+		/aerosol|air quality|\bozone\b|smoke|carbon monoxide|nitrogen dioxide|sulfur dioxide/.test(text)
+	)
+		return 'aerosol';
+	if (
+		/cloud|water vapor|water vapour|radiation|radiative|air mass|wind speed|wind direction|humidity|atmosphere|\bceres\b|\bairs\b/.test(
+			text
+		)
+	)
+		return 'atmosphere';
+	if (
+		/chlorophyll|ocean|sea surface|sea level|sea surface|currents|salinity|bathymetry|coast|\bwave\b/.test(
+			text
+		)
+	)
+		return 'ocean';
+	if (/species|biodiversity|amphibian|biome|habitat|coral reef|ecoregion/.test(text))
+		return 'biodiversity';
+	if (/elevation|digital elevation|shaded relief|topography|\bsrtm\b|\bgdem\b/.test(text))
+		return 'topography';
+	if (
+		/vegetation|\bndvi\b|\bevi\b|fpar|leaf area|land cover|land surface|\bsoil\b|biomass|forest|agricultur|crop|albedo/.test(
+			text
+		)
+	)
+		return 'land';
+	if (
+		/reflectance|true color|false color|day night band|nighttime imagery|black marble|blue marble|imagery/.test(
+			text
+		)
+	)
+		return 'imagery';
+	return 'other';
+};
+
+const resolutionForMatrixSet = (matrixSet: string, projection: GibsProjection): string => {
+	const known: Record<string, string> = {
+		'15.625m': '15.625 m',
+		'31.25m': '31.25 m',
+		'250m': '250 m',
+		'500m': '500 m',
+		'1km': '1 km',
+		'1.5km': '1.5 km',
+		'2km': '2 km'
+	};
+	if (known[matrixSet]) return known[matrixSet];
+	const pixelResolution = /^(\d+(?:\.\d+)?)(m|km)$/.exec(matrixSet);
+	if (pixelResolution) return `${pixelResolution[1]} ${pixelResolution[2]}`;
+	const match = /GoogleMapsCompatible_Level(\d+)$/.exec(matrixSet);
+	return match
+		? `Web Mercator · max zoom ${match[1]}`
+		: `${matrixSet} · ${projection.toUpperCase()}`;
+};
+
+const layerFromSnapshot = (entry: GibsCatalogSnapshotLayer): GibsLayerDef => ({
+	id: entry.id,
+	title: entry.title,
+	subtitle: entry.subtitle ?? 'NASA GIBS',
+	layerGroup: entry.layerGroup,
+	productGroup: entry.productGroup,
+	searchTags: entry.searchTags,
+	dataProducts: entry.dataProducts,
+	worldviewLayerId: entry.worldviewLayerId,
+	category: categoryFromMetadata(
+		entry.id,
+		entry.title,
+		[
+			entry.subtitle,
+			Array.isArray(entry.layerGroup) ? entry.layerGroup.join(' ') : entry.layerGroup,
+			entry.productGroup,
+			...(entry.searchTags ?? [])
+		]
+			.filter(Boolean)
+			.join(' ')
+	),
+	period: entry.period,
+	tileMatrixSet: entry.tileMatrixSet,
+	resolutionMatrixSet: entry.resolutionMatrixSet ?? entry.tileMatrixSet,
+	resolutionProjection: entry.resolutionProjection ?? entry.projection,
+	resolution: resolutionForMatrixSet(
+		entry.resolutionMatrixSet ?? entry.tileMatrixSet,
+		entry.resolutionProjection ?? entry.projection
+	),
+	coverageStart: entry.coverageStart,
+	legend: entry.legendUrl ?? undefined,
+	extension: entry.mapSupport === 'wms-rasterized-vector' ? 'png' : entry.extension,
+	format: entry.format,
+	formats: entry.formats,
+	tileTemplate: entry.tileTemplate ?? undefined,
+	availableProjections: entry.projections,
+	projection: entry.projection,
+	mapSupport: entry.mapSupport,
+	availabilityProjection: entry.availabilityProjection,
+	availabilityTileMatrixSet: entry.availabilityTileMatrixSet,
+	timeDimension: entry.timeDimension,
+	defaultTime: entry.defaultTime ?? undefined,
+	availabilityStart: '0001-01-01',
+	metadataUrl: entry.metadataUrl ?? undefined,
+	colormapUrl: entry.colormapUrl ?? undefined,
+	vectorStyleUrl: entry.vectorStyleUrl ?? undefined,
+	vectorMetadataUrl: entry.vectorMetadataUrl ?? undefined,
+	abstract: entry.abstract ?? undefined
+});
+
+const curatedById = new Map(GIBS_LAYERS.map((layer) => [layer.id, layer]));
+const snapshotById = new Map(CATALOG_SNAPSHOT.layers.map((entry) => [entry.id, entry]));
 
 /**
- * WMTS tile template for one layer and exact frame, with the `{z}/{x}/{y}`
- * placeholders MapLibre expects. The GIBS `Time` value may be a day or a full
- * UTC timestamp, depending on the layer's temporal resolution.
+ * Full, locally bundled snapshot of NASA's four official WMTS catalogues.
+ * Curated entries stay first and retain their hand-checked notes/dataset links;
+ * every other official layer follows in alphabetical identifier order.
  */
-export const gibsTileUrl = (layer: GibsLayerDef, frame: string): string =>
-	`${GIBS_BASE_URL}/${layer.id}/default/${frame}/${layer.tileMatrixSet}/{z}/{y}/{x}.${layer.extension}`;
+export const GIBS_CATALOG_LAYERS: GibsLayerDef[] = [
+	...GIBS_LAYERS.map((curated) => {
+		const snapshot = snapshotById.get(curated.id);
+		if (!snapshot) return { ...curated, mapSupport: 'wmts-raster' as const };
+		const generated = layerFromSnapshot(snapshot);
+		// Keep the existing, manually verified WMTS URL/extension and date
+		// behaviour for these featured entries while adding official metadata.
+		return {
+			...generated,
+			...curated,
+			tileTemplate: undefined,
+			availabilityStart: curated.coverageStart
+		};
+	}),
+	...CATALOG_SNAPSHOT.layers.filter((entry) => !curatedById.has(entry.id)).map(layerFromSnapshot)
+];
+
+const catalogueById = new Map(GIBS_CATALOG_LAYERS.map((layer) => [layer.id, layer]));
+
+export const GIBS_CATALOG_TOTAL = GIBS_CATALOG_LAYERS.length;
+export const GIBS_WEB_MERCATOR_TOTAL = GIBS_CATALOG_LAYERS.filter(
+	(layer) => layer.mapSupport !== 'projection-only'
+).length;
+
+/** Look up a catalogue entry by its GIBS identifier. */
+export const gibsLayerById = (id: string | null | undefined): GibsLayerDef | undefined =>
+	id ? catalogueById.get(id) : undefined;
+
+/** Layers of one topic, in catalogue order. */
+export const gibsLayersByCategory = (category: GibsCategory): GibsLayerDef[] =>
+	GIBS_CATALOG_LAYERS.filter((layer) => layer.category === category);
+
+/** Whether this entry can be honestly drawn on the app's Web-Mercator map. */
+export const gibsLayerCanRender = (layer: GibsLayerDef | undefined): boolean =>
+	!!layer && layer.mapSupport !== 'projection-only';
+
+/** Time dimensions shorter than one day use exact ISO UTC timestamps. */
+export const isSubdailyGibsPeriod = (period: GibsPeriod | undefined): boolean =>
+	!!period && /^PT/i.test(period);
+
+export const isSubdailyGibsLayer = (layer: GibsLayerDef | undefined): boolean =>
+	isSubdailyGibsPeriod(layer?.period);
+
+/** Parse a GIBS `PT…` duration into milliseconds. */
+export const gibsPeriodMilliseconds = (period: string | undefined): number | undefined => {
+	if (!period) return undefined;
+	const match = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i.exec(period);
+	if (!match || !match.slice(1).some(Boolean)) return undefined;
+	return (
+		Number(match[1] ?? 0) * 3_600_000 +
+		Number(match[2] ?? 0) * 60_000 +
+		Number(match[3] ?? 0) * 1000
+	);
+};
+
+/** A compact label for a capability's ISO cadence. */
+export const describeGibsPeriod = (period: GibsPeriod): string => {
+	if (period === 'static') return 'static layer';
+	if (period === 'P1D') return 'daily';
+	if (period === 'P1M') return 'monthly';
+	if (period === 'P1Y') return 'yearly';
+	const datePeriod = /^P(\d+)(D|M|Y)$/.exec(period);
+	if (datePeriod) {
+		const count = Number(datePeriod[1]);
+		const unit = datePeriod[2] === 'D' ? 'day' : datePeriod[2] === 'M' ? 'month' : 'year';
+		return `every ${count} ${unit}${count === 1 ? '' : 's'}`;
+	}
+	const milliseconds = gibsPeriodMilliseconds(period);
+	if (milliseconds !== undefined) {
+		const seconds = Math.round(milliseconds / 1000);
+		if (seconds < 60) return `every ${seconds} sec`;
+		const minutes = Math.floor(seconds / 60);
+		const remainder = seconds % 60;
+		if (minutes < 60) return `every ${minutes} min${remainder ? ` ${remainder} sec` : ''}`;
+		const hours = Math.floor(minutes / 60);
+		const extraMinutes = minutes % 60;
+		return `every ${hours} hr${extraMinutes ? ` ${extraMinutes} min` : ''}`;
+	}
+	return period;
+};
+
+const vectorWmsTileUrl = (layer: GibsLayerDef, frame?: string): string => {
+	const time = layer.timeDimension ? (frame ?? layer.defaultTime) : undefined;
+	const params = [
+		'SERVICE=WMS',
+		'VERSION=1.1.1',
+		'REQUEST=GetMap',
+		`LAYERS=${encodeURIComponent(layer.id)}`,
+		'STYLES=',
+		'FORMAT=image%2Fpng',
+		'TRANSPARENT=TRUE',
+		'SRS=EPSG%3A3857',
+		'WIDTH=256',
+		'HEIGHT=256',
+		'BBOX={bbox-epsg-3857}'
+	];
+	if (time) params.push(`TIME=${encodeURIComponent(time)}`);
+	return `${GIBS_VECTOR_WMS_URL}?${params.join('&')}`;
+};
+
+/**
+ * WMTS tile template for an exact frame, normalized to MapLibre's
+ * `{z}/{x}/{y}` tokens. MVT products use NASA's default-styled WMS image path.
+ */
+export const gibsTileUrl = (layer: GibsLayerDef, frame?: string): string => {
+	if (layer.mapSupport === 'wms-rasterized-vector') return vectorWmsTileUrl(layer, frame);
+
+	if (layer.tileTemplate) {
+		let url = layer.tileTemplate
+			.replaceAll('{TileMatrixSet}', layer.tileMatrixSet)
+			.replaceAll('{TileMatrix}', '{z}')
+			.replaceAll('{TileRow}', '{y}')
+			.replaceAll('{TileCol}', '{x}');
+		if (url.includes('{Time}')) {
+			const time = frame ?? layer.defaultTime ?? '';
+			url = url.replaceAll('{Time}', time);
+		}
+		return url;
+	}
+
+	if (layer.period === 'static')
+		return `${GIBS_BASE_URL}/${layer.id}/default/${layer.tileMatrixSet}/{z}/{y}/{x}.${layer.extension}`;
+
+	return `${GIBS_BASE_URL}/${layer.id}/default/${frame ?? layer.defaultTime ?? ''}/${layer.tileMatrixSet}/{z}/{y}/{x}.${layer.extension}`;
+};
 
 /** One contiguous run of available imagery, as published by GIBS. */
 export interface GibsAvailabilityRange {
@@ -574,18 +915,8 @@ export interface GibsTimeRange {
 	stepMs: number;
 }
 
-const DURATION_HOUR_MS = 60 * 60 * 1000;
-
 /** Parse the minute/hour/second ISO durations used by sub-daily WMTS domains. */
-const isoDurationMs = (duration: string): number | undefined => {
-	const match = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(duration);
-	if (!match || !match.slice(1).some(Boolean)) return undefined;
-	return (
-		Number(match[1] ?? 0) * DURATION_HOUR_MS +
-		Number(match[2] ?? 0) * 60_000 +
-		Number(match[3] ?? 0) * 1000
-	);
-};
+const isoDurationMs = (duration: string): number | undefined => gibsPeriodMilliseconds(duration);
 
 /**
  * Normalize a GIBS UTC frame key. Date-only input means midnight UTC; a
@@ -705,9 +1036,12 @@ export const shiftGibsTimestamp = (value: string, minutes: number): string | und
 	return new Date(Date.parse(normalized) + minutes * 60_000).toISOString().replace('.000Z', 'Z');
 };
 
-/** The available-dates request for a layer and window (start and end inclusive). */
-export const gibsAvailabilityUrl = (layer: GibsLayerDef, start: string, end: string): string =>
-	`${GIBS_BASE_URL}/1.0.0/${layer.id}/default/${layer.tileMatrixSet}/all/${start}--${end}.xml`;
+/** The DescribeDomains request for a layer and inclusive date window. */
+export const gibsAvailabilityUrl = (layer: GibsLayerDef, start: string, end: string): string => {
+	const projection = layer.availabilityProjection ?? 'epsg3857';
+	const matrixSet = layer.availabilityTileMatrixSet ?? layer.tileMatrixSet;
+	return `${GIBS_WMTS_BASE_URLS[projection]}/1.0.0/${layer.id}/default/${matrixSet}/all/${start}--${end}.xml`;
+};
 
 /** Last day with imagery, which is what "latest" means for this layer. */
 export const latestAvailableDay = (ranges: GibsAvailabilityRange[]): string | undefined =>
@@ -721,56 +1055,104 @@ export const earliestAvailableDay = (ranges: GibsAvailabilityRange[]): string | 
 const rangeAt = (ranges: GibsAvailabilityRange[], day: string): GibsAvailabilityRange | undefined =>
 	ranges.find((range) => range.start <= day && day <= range.end);
 
+/** Shift a UTC day by calendar months, clamping month-end dates safely. */
+export const shiftIsoMonth = (day: string, months: number): string => {
+	const current = new Date(`${day}T00:00:00Z`);
+	const wantedDay = current.getUTCDate();
+	const target = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + months, 1));
+	const monthEnd = new Date(
+		Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)
+	).getUTCDate();
+	target.setUTCDate(Math.min(wantedDay, monthEnd));
+	return target.toISOString().slice(0, 10);
+};
+
+const monthsInPeriod = (period: string): number | undefined => {
+	const match = /^P(\d+)(M|Y)$/.exec(period);
+	if (!match) return undefined;
+	return Number(match[1]) * (match[2] === 'Y' ? 12 : 1);
+};
+
+const snapWithinRange = (day: string, range: GibsAvailabilityRange): string => {
+	const monthStep = monthsInPeriod(range.step);
+	if (monthStep) {
+		const startMonth = Date.parse(`${range.start.slice(0, 7)}-01T00:00:00Z`);
+		const targetMonth = Date.parse(`${day.slice(0, 7)}-01T00:00:00Z`);
+		const monthsApart =
+			(new Date(targetMonth).getUTCFullYear() - new Date(startMonth).getUTCFullYear()) * 12 +
+			new Date(targetMonth).getUTCMonth() -
+			new Date(startMonth).getUTCMonth();
+		return shiftIsoMonth(range.start, Math.floor(monthsApart / monthStep) * monthStep);
+	}
+	const dayStep = stepToDays(range.step);
+	const offset = Math.max(0, isoDayDiff(range.start, day));
+	return shiftIsoDay(range.start, Math.floor(offset / dayStep) * dayStep);
+};
+
 /**
- * Snap a day to the start of the composite period it belongs to: aggregating
- * layers only publish one image per period (16 days, or a calendar month), so
- * asking for the snapped day keeps the label honest. Daily layers are
- * returned unchanged.
+ * Snap a requested day to the layer's actual composite interval. GIBS publishes
+ * daily, multi-day, monthly/quarterly/yearly and irregular ranges; each
+ * DescribeDomains range is used as the alignment anchor, so the selected date
+ * always names a frame that really exists.
  */
 export const snapToPeriod = (
 	layer: GibsLayerDef,
 	day: string,
 	ranges: GibsAvailabilityRange[] = []
 ): string => {
-	if (layer.period === 'P1M') return `${day.slice(0, 7)}-01`;
-	if (layer.period === 'P1D' || layer.period === 'PT30M') return day;
 	const range = rangeAt(ranges, day);
-	if (!range) return day;
-	const offset = isoDayDiff(range.start, day);
-	return shiftIsoDay(range.start, Math.floor(offset / range.stepDays) * range.stepDays);
+	if (range) return snapWithinRange(day, range);
+
+	const period = layer.period;
+	if (period === 'P1M') return `${day.slice(0, 7)}-01`;
+	const monthStep = monthsInPeriod(period);
+	if (monthStep) {
+		const anchor = layer.coverageStart || `${day.slice(0, 7)}-01`;
+		const startMonth = Date.parse(`${anchor.slice(0, 7)}-01T00:00:00Z`);
+		const targetMonth = Date.parse(`${day.slice(0, 7)}-01T00:00:00Z`);
+		const monthsApart =
+			(new Date(targetMonth).getUTCFullYear() - new Date(startMonth).getUTCFullYear()) * 12 +
+			new Date(targetMonth).getUTCMonth() -
+			new Date(startMonth).getUTCMonth();
+		return shiftIsoMonth(anchor, Math.floor(monthsApart / monthStep) * monthStep);
+	}
+	const dayStep = /^P(\d+)D$/.exec(period);
+	if (dayStep && Number(dayStep[1]) > 1) {
+		const anchor = layer.coverageStart || day;
+		const offset = Math.max(0, isoDayDiff(anchor, day));
+		return shiftIsoDay(anchor, Math.floor(offset / Number(dayStep[1])) * Number(dayStep[1]));
+	}
+	return day;
 };
 
 /**
- * The day that will actually be rendered for a request: the snapped day when
- * it has imagery, otherwise the nearest available day (clamped to the ends of
- * the archive). Returns undefined only when the layer has no imagery at all in
- * the requested window.
+ * Resolve to the nearest published frame, snapping within each range. This
+ * compares range edges directly rather than walking a fixed 400-day window,
+ * which also handles sparse yearly and multi-year catalogue products.
  */
 export const resolveAvailableDay = (
-	layer: GibsLayerDef,
+	_layer: GibsLayerDef,
 	day: string,
 	ranges: GibsAvailabilityRange[]
 ): string | undefined => {
 	if (!ranges.length) return undefined;
-	const earliest = earliestAvailableDay(ranges);
-	const latest = latestAvailableDay(ranges);
-	if (earliest === undefined || latest === undefined) return undefined;
+	const containing = rangeAt(ranges, day);
+	if (containing) return snapWithinRange(day, containing);
 
-	if (day < earliest) return snapToPeriod(layer, earliest, ranges);
-	if (day > latest) return snapToPeriod(layer, latest, ranges);
-
-	const snapped = snapToPeriod(layer, day, ranges);
-	if (rangeAt(ranges, snapped)) return snapped;
-
-	// Inside the covered span but in a gap: walk outwards, day by day, until an
-	// available range is hit — gaps are short (a few days) in practice.
-	for (let distance = 1; distance <= 400; distance++) {
-		const before = shiftIsoDay(snapped, -distance);
-		const after = shiftIsoDay(snapped, distance);
-		if (after <= latest && rangeAt(ranges, after)) return after;
-		if (before >= earliest && rangeAt(ranges, before)) return before;
+	let nearest: string | undefined;
+	let nearestDistance = Number.POSITIVE_INFINITY;
+	for (const range of ranges) {
+		const candidate = day < range.start ? range.start : snapWithinRange(range.end, range);
+		const distance = Math.abs(isoDayDiff(day, candidate));
+		if (
+			distance < nearestDistance ||
+			(distance === nearestDistance && candidate < (nearest ?? candidate))
+		) {
+			nearest = candidate;
+			nearestDistance = distance;
+		}
 	}
-	return undefined;
+	return nearest;
 };
 
 /** Human-readable coverage/summary line for the panel. */
@@ -794,10 +1176,11 @@ export const gibsWorldviewUrl = (
 	layer: GibsLayerDef,
 	day: string,
 	view?: [number, number, number, number]
-): string => {
+): string | undefined => {
+	if (!layer.worldviewLayerId) return undefined;
 	const [west, south, east, north] = view ?? [85, 18, 95, 29];
 	const round = (value: number): number => Math.round(value * 100) / 100;
-	return `https://worldview.earthdata.nasa.gov/?v=${round(west)},${round(south)},${round(east)},${round(north)}&t=${day}&l=${layer.id}&lg=false`;
+	return `https://worldview.earthdata.nasa.gov/?v=${round(west)},${round(south)},${round(east)},${round(north)}&t=${day}&l=${layer.worldviewLayerId}&lg=false`;
 };
 
 /** One bar of the availability strip, as a fraction of the archive span. */
@@ -853,7 +1236,9 @@ export const formatGibsDay = (day: string, locale = 'en-GB'): string =>
 export const formatGibsTimestamp = (value: string, locale = 'en-GB'): string => {
 	const timestamp = normalizeGibsTimestamp(value);
 	if (!timestamp) return value;
-	return `${formatGibsDay(timestamp.slice(0, 10), locale)} ${timestamp.slice(11, 16)} UTC`;
+	const clock = timestamp.slice(11, 16);
+	const seconds = timestamp.slice(17, 19);
+	return `${formatGibsDay(timestamp.slice(0, 10), locale)} ${clock}${seconds === '00' ? '' : `:${seconds}`} UTC`;
 };
 
 /**

@@ -25,6 +25,8 @@ import { loading } from '$lib/stores/preferences';
 import {
 	earliestAvailableTime,
 	gibsLayerById,
+	gibsLayerCanRender,
+	isSubdailyGibsLayer,
 	isoDayOf,
 	latestAvailableDay,
 	latestAvailableTime
@@ -44,7 +46,7 @@ import {
 	replayPresets,
 	replayUrlParams,
 	satelliteFrames,
-	stepLabel,
+	stepLabelForLayer,
 	stepsForLayer,
 	subdailyFrames,
 	warmupRange
@@ -103,7 +105,7 @@ export const replayPresetList = derived(
 	([$availability, $layerId, $metaJson]): ReplayPreset[] => {
 		const layer = gibsLayerById($layerId);
 		const validTimes = $metaJson?.valid_times ?? [];
-		return replayPresets({
+		const presets = replayPresets({
 			latestDay: latestAvailableDay($availability.ranges),
 			latestTime: latestAvailableTime($availability.timeRanges),
 			coverageStart: layer?.coverageStart ?? $availability.ranges[0]?.start,
@@ -111,6 +113,9 @@ export const replayPresetList = derived(
 			temporalResolution: layer?.period,
 			today: isoDayOf(new Date())
 		});
+		return layer && (!gibsLayerCanRender(layer) || layer.period === 'static')
+			? presets.filter((preset) => preset.mode === 'forecast')
+			: presets;
 	}
 );
 
@@ -135,9 +140,10 @@ const buildFrames = (): ReplayBuild => {
 	}
 
 	const { ranges, timeRanges } = get(gibsAvailability);
-	if (!ranges.length) return { frames: [], limitExceeded: false };
 	const layer = gibsLayerById(get(gibsLayerId));
-	if (layer?.period === 'PT30M') {
+	if (!ranges.length || (layer && (!gibsLayerCanRender(layer) || layer.period === 'static')))
+		return { frames: [], limitExceeded: false };
+	if (isSubdailyGibsLayer(layer)) {
 		if (!timeRanges.length) return { frames: [], limitExceeded: false };
 		const first = from ?? earliestAvailableTime(timeRanges);
 		const last = to ?? latestAvailableTime(timeRanges);
@@ -174,7 +180,9 @@ const modeForRange = (
 ): ReplayMode => {
 	// An exact UTC timestamp is a satellite time dimension, and must not be
 	// mistaken for forecast merely because its date overlaps the loaded run.
-	if (from?.includes('T') || gibsLayerById(layerId)?.period === 'PT30M') return 'satellite';
+	const layer = gibsLayerById(layerId);
+	if (from?.includes('T') || layer?.period === 'static' || isSubdailyGibsLayer(layer))
+		return 'satellite';
 	const first = meta?.valid_times?.[0];
 	if (!from || !first) return 'satellite';
 	return from.slice(0, 10) >= isoDayOf(new Date(first)) ? 'forecast' : 'satellite';
@@ -481,12 +489,15 @@ export const cancelWarmUp = (): void => {
 
 /** Summary line for the bar: frames and how long the pass takes. */
 export const replaySummary = derived(
-	[replayFrames, replaySpeed, replayStep],
-	([$frames, $speed, $step]) => {
+	[replayFrames, replaySpeed, replayStep, gibsLayerId, replayMode],
+	([$frames, $speed, $step, $layerId, $mode]) => {
 		if (!$frames.length) return 'No frames in this range';
 		const seconds = Math.round(($frames.length * replayIntervalMs($speed)) / 1000);
 		const duration = seconds >= 60 ? `${Math.round(seconds / 60)} min` : `${seconds} s`;
-		const every = stepLabel($step);
+		const every = stepLabelForLayer(
+			$step,
+			$mode === 'satellite' ? gibsLayerById($layerId) : undefined
+		);
 		return `${$frames.length} frames · every ${every} · ≈ ${duration}`;
 	}
 );
@@ -523,11 +534,18 @@ export const initReplayState = (): void => {
 		if (get(replayOpen)) refreshReplayFrames();
 	});
 	gibsLayerId.subscribe((layerId) => {
-		// A 16-day or monthly composite cannot move a day at a time; fall back to
-		// the cadence it does have instead of offering a step that repeats frames.
 		const layer = gibsLayerById(layerId);
-		if (layer && !stepsForLayer(layer).includes(get(replayStep))) {
-			replayStep.set(stepsForLayer(layer)[0]);
+		if (!layer || layer.period === 'static') {
+			pauseReplay();
+			replayFrames.set([]);
+			replayFrameLimitExceeded.set(false);
+			if (get(replayOpen)) syncReplayUrl();
+			return;
+		}
+		// The native step covers unusual cadences such as P8D, PT6M and PT59M41S.
+		const available = stepsForLayer(layer);
+		if (available.length && !available.includes(get(replayStep))) {
+			replayStep.set(available[0]);
 			return; // the step subscription below rebuilds the frames
 		}
 		if (get(replayOpen)) refreshReplayFrames();

@@ -1,17 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	GIBS_CATALOG_LAYERS,
+	GIBS_CATALOG_SNAPSHOT_DATE,
+	GIBS_CATALOG_TOTAL,
 	GIBS_CATEGORIES,
 	GIBS_LAYERS,
 	GIBS_URL_DATE_PARAM,
 	GIBS_URL_LAYER_PARAM,
 	GIBS_URL_TIME_PARAM,
+	GIBS_WEB_MERCATOR_TOTAL,
 	type GibsAvailabilityRange,
 	type GibsTimeRange,
 	describeCoverage,
+	describeGibsPeriod,
 	formatGibsDay,
 	formatGibsTimestamp,
 	gibsLayerById,
+	gibsLayerCanRender,
 	gibsLayersByCategory,
 	gibsRibbonFraction,
 	gibsRibbonSegments,
@@ -102,6 +108,19 @@ describe('parseGibsTimeAvailability', () => {
 		]);
 	});
 
+	it('parses sub-daily native cadences including non-round seconds', () => {
+		const ranges = parseGibsTimeAvailability(
+			'<Domains><Domain>2024-05-01T00:00:00Z/2024-05-01T03:00:00Z/PT59M41S</Domain></Domains>'
+		);
+		expect(ranges).toEqual([
+			{
+				start: '2024-05-01T00:00:00Z',
+				end: '2024-05-01T02:59:03Z',
+				stepMs: 3_581_000
+			}
+		]);
+	});
+
 	it('keeps fragmented exact-time domains compact and projects their covered days', () => {
 		const ranges = parseGibsTimeAvailability(
 			'<Domains><DimensionDomain><Domain>2024-05-01T00:00:00Z/2024-05-01T01:30:00Z/PT30M,2024-05-03T23:00:00Z/2024-05-03T23:30:00Z/PT30M</Domain></DimensionDomain></Domains>'
@@ -145,6 +164,7 @@ describe('exact GIBS timestamp helpers', () => {
 	it('shifts in UTC and formats the frame with an explicit UTC label', () => {
 		expect(shiftGibsTimestamp('2024-05-01T23:30:00Z', 30)).toBe('2024-05-02T00:00:00Z');
 		expect(formatGibsTimestamp('2024-05-01T00:30:00Z')).toBe('Wed, 1 May 2024 00:30 UTC');
+		expect(formatGibsTimestamp('2024-05-01T00:59:41Z')).toBe('Wed, 1 May 2024 00:59:41 UTC');
 	});
 });
 
@@ -153,7 +173,7 @@ describe('gibsTileUrl', () => {
 		const layer = gibsLayerById('IMERG_Precipitation_Rate');
 		expect(layer).toBeDefined();
 		expect(gibsTileUrl(layer!, '2024-08-01')).toBe(
-			'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/IMERG_Precipitation_Rate/default/2024-08-01/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png'
+			'https://gibs.earthdata.nasa.gov/wmts/epsg3857/all/IMERG_Precipitation_Rate/default/2024-08-01/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png'
 		);
 	});
 
@@ -161,9 +181,39 @@ describe('gibsTileUrl', () => {
 		const layer = gibsLayerById('MODIS_Terra_CorrectedReflectance_TrueColor');
 		expect(gibsTileUrl(layer!, '2020-06-15').endsWith('.jpg')).toBe(true);
 	});
+
+	it('renders MVT products as default-styled WMS images, not raster MVT tiles', () => {
+		const vector = GIBS_CATALOG_LAYERS.find(
+			(layer) => layer.mapSupport === 'wms-rasterized-vector'
+		)!;
+		const url = gibsTileUrl(vector, '2024-08-01T12:00:00Z');
+		expect(url).toContain('/wms/epsg4326/all/wms.cgi?');
+		expect(url).toContain('FORMAT=image%2Fpng');
+		expect(url).toContain('SRS=EPSG%3A3857');
+		expect(url).toContain('BBOX={bbox-epsg-3857}');
+		expect(url).toContain('TIME=2024-08-01T12%3A00%3A00Z');
+	});
+
+	it('builds timeless layer URLs without inventing a date', () => {
+		const layer = GIBS_CATALOG_LAYERS.find(
+			(entry) => entry.period === 'static' && entry.mapSupport === 'wmts-raster'
+		)!;
+		const url = gibsTileUrl(layer);
+		expect(url).toContain('/default/');
+		expect(url).not.toContain('{Time}');
+		expect(url).not.toMatch(/default\/\//);
+	});
 });
 
 describe('date helpers', () => {
+	it('describes daily, multi-day, static and arbitrary sub-daily cadences', () => {
+		expect(describeGibsPeriod('P1D')).toBe('daily');
+		expect(describeGibsPeriod('P8D')).toBe('every 8 days');
+		expect(describeGibsPeriod('PT6M')).toBe('every 6 min');
+		expect(describeGibsPeriod('PT59M41S')).toBe('every 59 min 41 sec');
+		expect(describeGibsPeriod('static')).toBe('static layer');
+	});
+
 	it('shifts days across month boundaries', () => {
 		expect(shiftIsoDay('2024-03-01', -1)).toBe('2024-02-29');
 		expect(shiftIsoDay('2024-12-31', 1)).toBe('2025-01-01');
@@ -243,6 +293,60 @@ describe('describeCoverage', () => {
 });
 
 describe('the catalogue itself', () => {
+	it('includes the full generated NASA catalogue without dropping curated quick picks', () => {
+		expect(GIBS_CATALOG_SNAPSHOT_DATE).toBe('2026-10-03');
+		expect(GIBS_CATALOG_TOTAL).toBe(3343);
+		expect(GIBS_WEB_MERCATOR_TOTAL).toBe(3276);
+		expect(GIBS_CATALOG_LAYERS.slice(0, GIBS_LAYERS.length).map((layer) => layer.id)).toEqual(
+			GIBS_LAYERS.map((layer) => layer.id)
+		);
+		expect(new Set(GIBS_CATALOG_LAYERS.map((layer) => layer.id)).size).toBe(GIBS_CATALOG_TOTAL);
+	});
+
+	it('reports imagery resolution from the native grid, not the Web Mercator max zoom', () => {
+		const vector = gibsLayerById('ACTIVATE_HU-25_Falcon_Ozone')!;
+		expect(vector.tileMatrixSet).toBe('GoogleMapsCompatible_Level6');
+		expect(vector.resolutionMatrixSet).toBe('2km');
+		expect(vector.resolutionProjection).toBe('epsg4326');
+		expect(vector.resolution).toBe('2 km');
+
+		const polarOnly = gibsLayerById('AIRS_L2_Surface_Air_Temperature_Polar')!;
+		expect(polarOnly.resolution).toBe('1 km');
+		expect(polarOnly.resolutionProjection).toBe('epsg3413');
+	});
+
+	it('includes version- and latency-specific WMTS entries in addition to best-available layers', () => {
+		const variant = gibsLayerById('AIRS_L2_Dust_Score_Day_v7_STD');
+		expect(variant).toBeDefined();
+		expect(variant?.mapSupport).toBe('wmts-raster');
+		expect(variant?.title).toContain('Standard');
+		expect(gibsTileUrl(variant!, '2026-09-28')).toContain(
+			'/wmts/epsg3857/all/AIRS_L2_Dust_Score_Day_v7_STD/'
+		);
+	});
+
+	it('includes official platform, measurement and NASA CMR source-product metadata', () => {
+		const layer = gibsLayerById('ACTIVATE_HU-25_Falcon_Ozone')!;
+		expect(layer.subtitle).toBe('ACTIVATE/NASA HU-25 Falcon');
+		expect(layer.layerGroup).toBe('Ozone');
+		expect(layer.searchTags).toContain('suborbital');
+		expect(layer.dataProducts?.[0]).toMatchObject({
+			id: 'C1994460739-LARC_ASDC',
+			shortName: 'ACTIVATE_MetNav_AircraftInSitu_Falcon_Data',
+			type: 'STD'
+		});
+		expect(layer.worldviewLayerId).toBe('ACTIVATE_HU-25_Falcon_Ozone');
+	});
+
+	it('keeps polar-only products searchable but marks them as not renderable', () => {
+		const polarOnly = GIBS_CATALOG_LAYERS.filter((layer) => layer.mapSupport === 'projection-only');
+		expect(polarOnly).toHaveLength(67);
+		for (const layer of polarOnly) {
+			expect(gibsLayerCanRender(layer)).toBe(false);
+			expect(layer.availableProjections).not.toContain('epsg3857');
+		}
+	});
+
 	it('has unique ids and a known category', () => {
 		const ids = GIBS_LAYERS.map((layer) => layer.id);
 		expect(new Set(ids).size).toBe(ids.length);
@@ -270,11 +374,18 @@ describe('the catalogue itself', () => {
 	});
 
 	it('links back to Worldview with the layer and the day', () => {
-		const layer = gibsLayerById('MODIS_Combined_Flood_1-Day')!;
+		const layer = gibsLayerById('ACTIVATE_HU-25_Falcon_Ozone')!;
 		const url = gibsWorldviewUrl(layer, '2024-07-01', [88, 20, 93, 27]);
+		expect(url).toBeDefined();
 		expect(url).toContain('t=2024-07-01');
-		expect(url).toContain('l=MODIS_Combined_Flood_1-Day');
+		expect(url).toContain('l=ACTIVATE_HU-25_Falcon_Ozone');
 		expect(url).toContain('v=88,20,93,27');
+	});
+
+	it('does not create a broken Worldview URL for WMTS-only layer variants', () => {
+		const variant = gibsLayerById('AIRS_L2_Dust_Score_Day_v7_STD')!;
+		expect(variant.worldviewLayerId).toBeUndefined();
+		expect(gibsWorldviewUrl(variant, '2024-07-01')).toBeUndefined();
 	});
 });
 

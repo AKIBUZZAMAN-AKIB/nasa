@@ -12,3 +12,6 @@ package-lock.json
 
 # Miscellaneous
 /static/
+
+# Generated upstream NASA GIBS capabilities snapshot (kept compact)
+src/lib/gibs-catalog.generated.json

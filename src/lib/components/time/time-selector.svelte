@@ -33,7 +33,7 @@
 		MILLISECONDS_PER_HOUR,
 		MILLISECONDS_PER_WEEK
 	} from '$lib/constants';
-	import { gibsLayerById, isoDayOf } from '$lib/gibs';
+	import { gibsLayerById, isSubdailyGibsLayer, isoDayOf } from '$lib/gibs';
 	import { throttle } from '$lib/helpers';
 	import { changeOMfileURL } from '$lib/layers';
 	import { tryGetMetaData } from '$lib/metadata';
@@ -55,7 +55,9 @@
 	// Disables time selection when loading new OM files. Satellite browsing has
 	// no model run to wait for, so the control stays live there.
 	let disabled = $derived($modelRun === undefined && !$gibsBrowse);
-	const subdailyGibs = $derived($gibsBrowse && gibsLayerById($gibsLayerId)?.period === 'PT30M');
+	const activeGibsLayer = $derived(gibsLayerById($gibsLayerId));
+	const subdailyGibs = $derived($gibsBrowse && isSubdailyGibsLayer(activeGibsLayer));
+	const staticGibs = $derived($gibsBrowse && activeGibsLayer?.period === 'static');
 	// Tracks the currently selected date for display and navigation
 	let currentDate = $state(new Date($time));
 
@@ -389,26 +391,30 @@
 		}
 	};
 
-	// The same chevrons and keys work in both modes: forecast steps stay native;
-	// satellite steps follow the layer's cadence (including 30-minute IMERG).
+	// The same chevrons and keys work in both modes; GIBS steps follow each
+	// layer's native cadence, while static entries deliberately have no clock step.
 	const stepBack = () => {
-		if ($gibsBrowse) shiftGibsDate(-1);
-		else previousHour();
+		if ($gibsBrowse) {
+			if (!staticGibs) shiftGibsDate(-1);
+		} else previousHour();
 	};
 
 	const stepForward = () => {
-		if ($gibsBrowse) shiftGibsDate(1);
-		else nextHour();
+		if ($gibsBrowse) {
+			if (!staticGibs) shiftGibsDate(1);
+		} else nextHour();
 	};
 
 	const dayBack = () => {
-		if ($gibsBrowse) shiftGibsDate(-1);
-		else previousDay();
+		if ($gibsBrowse) {
+			if (!staticGibs) shiftGibsDate(-1);
+		} else previousDay();
 	};
 
 	const dayForward = () => {
-		if ($gibsBrowse) shiftGibsDate(1);
-		else nextDay();
+		if ($gibsBrowse) {
+			if (!staticGibs) shiftGibsDate(1);
+		} else nextDay();
 	};
 
 	const latestStep = () => {
@@ -1053,20 +1059,26 @@
 				: 'left-0 w-12 backdrop-blur-xxs'}"
 		>
 			<button
-				class="flex items-center {desktop.current ? 'h-12.5  ' : 'top-3.5 w-12 h-full'} {disabled
-					? 'cursor-not-allowed'
+				class="flex items-center {desktop.current ? 'h-12.5  ' : 'top-3.5 w-12 h-full'} {disabled ||
+				staticGibs
+					? 'cursor-not-allowed opacity-40'
 					: 'cursor-pointer'} "
+				disabled={disabled || staticGibs}
 				onclick={stepBack}
-				aria-label={$gibsBrowse
-					? subdailyGibs
-						? 'Previous frame'
-						: 'Previous day'
-					: 'Previous hour'}
-				title={$gibsBrowse
-					? subdailyGibs
-						? 'Earlier satellite frame'
-						: 'Earlier satellite day'
-					: 'Previous hour'}
+				aria-label={staticGibs
+					? 'Static layer has no time navigation'
+					: $gibsBrowse
+						? subdailyGibs
+							? 'Previous frame'
+							: 'Previous day'
+						: 'Previous hour'}
+				title={staticGibs
+					? 'This static layer has no time dimension'
+					: $gibsBrowse
+						? subdailyGibs
+							? 'Earlier satellite frame'
+							: 'Earlier satellite day'
+						: 'Previous hour'}
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
@@ -1096,14 +1108,25 @@
 			<button
 				class="flex items-center justify-end w-7 {desktop.current
 					? '-right-7 h-12.5'
-					: 'right-0 w-12 h-full'} {disabled ? 'cursor-not-allowed' : 'cursor-pointer'} "
+					: 'right-0 w-12 h-full'} {disabled || staticGibs
+					? 'cursor-not-allowed opacity-40'
+					: 'cursor-pointer'} "
+				disabled={disabled || staticGibs}
 				onclick={stepForward}
-				aria-label={$gibsBrowse ? (subdailyGibs ? 'Next frame' : 'Next day') : 'Next hour'}
-				title={$gibsBrowse
-					? subdailyGibs
-						? 'Later satellite frame'
-						: 'Later satellite day'
-					: 'Next hour'}
+				aria-label={staticGibs
+					? 'Static layer has no time navigation'
+					: $gibsBrowse
+						? subdailyGibs
+							? 'Next frame'
+							: 'Next day'
+						: 'Next hour'}
+				title={staticGibs
+					? 'This static layer has no time dimension'
+					: $gibsBrowse
+						? subdailyGibs
+							? 'Later satellite frame'
+							: 'Later satellite day'
+						: 'Next hour'}
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"

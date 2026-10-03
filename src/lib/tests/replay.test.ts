@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-	GIBS_LAYERS,
+	GIBS_CATALOG_LAYERS,
 	type GibsAvailabilityRange,
 	type GibsTimeRange,
 	gibsLayerById,
@@ -28,7 +28,7 @@ import {
 const range = (start: string, end: string, step = 'P1D'): GibsAvailabilityRange => ({
 	start,
 	end,
-	stepDays: step === 'P16D' ? 16 : 1,
+	stepDays: Number(/^P(\d+)D$/.exec(step)?.[1] ?? 1),
 	step
 });
 
@@ -56,15 +56,23 @@ describe('replayStepDef', () => {
 		expect(stepLabel('7d')).toBe('7 days');
 	});
 
-	it('offers only the cadences a composite layer can actually change in', () => {
+	it('offers only cadences the composite can change in, plus native for unusual periods', () => {
 		const daily = gibsLayerById('MODIS_Terra_CorrectedReflectance_TrueColor')!;
 		const sixteen = gibsLayerById('MODIS_Aqua_L3_NDVI_16Day')!;
 		const monthly = gibsLayerById('MERRA2_2m_Air_Temperature_Monthly')!;
+		const eightDay = GIBS_CATALOG_LAYERS.find((layer) => layer.period === 'P8D')!;
+		const ninetyMinute = GIBS_CATALOG_LAYERS.find((layer) => layer.period === 'PT90M')!;
+		const staticLayer = GIBS_CATALOG_LAYERS.find((layer) => layer.period === 'static')!;
 		expect(stepsForLayer(daily)).toContain('1d');
 		expect(stepsForLayer(sixteen)[0]).toBe('16d');
 		expect(stepsForLayer(sixteen)).not.toContain('1d');
 		expect(stepsForLayer(monthly)[0]).toBe('1M');
 		expect(stepsForLayer(monthly)).not.toContain('1d');
+		expect(stepsForLayer(eightDay)).toContain('native');
+		expect(stepsForLayer(eightDay)).not.toContain('1d');
+		expect(stepsForLayer(ninetyMinute)).toContain('native');
+		expect(stepsForLayer(ninetyMinute)).not.toContain('1h');
+		expect(stepsForLayer(staticLayer)).toEqual([]);
 	});
 });
 
@@ -100,6 +108,18 @@ describe('satelliteFrames', () => {
 			'2024-05-04',
 			'2024-05-07',
 			'2024-05-10'
+		]);
+	});
+
+	it('walks an unusual native multi-day cadence without daily duplicates', () => {
+		const eightDay = [range('2024-01-01', '2024-02-10', 'P8D')];
+		expect(satelliteFrames(eightDay, '2024-01-01', '2024-02-10', 'native')).toEqual([
+			'2024-01-01',
+			'2024-01-09',
+			'2024-01-17',
+			'2024-01-25',
+			'2024-02-02',
+			'2024-02-10'
 		]);
 	});
 
@@ -170,6 +190,31 @@ describe('subdailyFrames', () => {
 			'2024-05-01T02:00:00Z',
 			'2024-05-01T03:00:00Z',
 			'2024-05-01T04:00:00Z'
+		]);
+	});
+
+	it('emits the exact native frames for a six-minute cadence', () => {
+		const ranges = [
+			{ start: '2024-05-01T00:00:00Z', end: '2024-05-01T00:12:00Z', stepMs: 6 * 60_000 }
+		];
+		const result = subdailyFrames(ranges, ranges[0].start, ranges[0].end, 'native');
+		expect(result.frames).toEqual([
+			'2024-05-01T00:00:00Z',
+			'2024-05-01T00:06:00Z',
+			'2024-05-01T00:12:00Z'
+		]);
+	});
+
+	it('samples irregular-second cadences onto the nearest valid native frame', () => {
+		const ranges = [
+			{ start: '2024-05-01T00:00:00Z', end: '2024-05-01T03:00:00Z', stepMs: 3_581_000 }
+		];
+		const result = subdailyFrames(ranges, ranges[0].start, ranges[0].end, '1h');
+		expect(result.frames).toEqual([
+			'2024-05-01T00:00:00Z',
+			'2024-05-01T00:59:41Z',
+			'2024-05-01T01:59:22Z',
+			'2024-05-01T02:59:03Z'
 		]);
 	});
 
@@ -324,6 +369,30 @@ describe('replayPresets', () => {
 		expect(getPreset('satellite-all').from).toBe('1998-01-01T23:30:00Z');
 	});
 
+	it('chooses safe replay presets for other sub-daily and multi-day cadences', () => {
+		const ninetyMinute = replayPresets({
+			latestDay: '2026-09-30',
+			latestTime: '2026-09-30T23:59:41Z',
+			temporalResolution: 'PT90M',
+			today: '2026-10-01'
+		});
+		const preset = (list: ReturnType<typeof replayPresets>, id: string) =>
+			list.find((entry) => entry.id === id)!;
+		expect(preset(ninetyMinute, 'satellite-24h').step).toBe('native');
+		expect(preset(ninetyMinute, 'satellite-week').step).toBe('3h');
+		expect(preset(ninetyMinute, 'satellite-month').step).toBe('6h');
+		expect(preset(ninetyMinute, 'satellite-24h').to).toBe('2026-09-30T23:59:41Z');
+
+		const eightDay = replayPresets({
+			latestDay: '2026-09-30',
+			coverageStart: '2010-01-01',
+			temporalResolution: 'P8D',
+			today: '2026-10-01'
+		});
+		expect(preset(eightDay, 'satellite-year').step).toBe('native');
+		expect(preset(eightDay, 'satellite-year').label).toContain('every 8 days');
+	});
+
 	it('falls back to last year’s monsoon when this year’s has not started', () => {
 		const beforeMonsoon = replayPresets({
 			latestDay: '2026-03-05',
@@ -406,11 +475,17 @@ describe('replay URL round trip', () => {
 });
 
 describe('catalogue coverage', () => {
-	it('answers for every layer with a plausible number of steps', () => {
-		for (const layer of GIBS_LAYERS) {
+	it('answers for every temporal catalogue layer and leaves static layers without replay steps', () => {
+		for (const layer of GIBS_CATALOG_LAYERS) {
 			const steps = stepsForLayer(layer);
+			if (layer.period === 'static') {
+				expect(steps).toEqual([]);
+				continue;
+			}
 			expect(steps.length).toBeGreaterThan(0);
-			for (const step of steps) expect(replayStepDef(step).days).toBeGreaterThan(0);
+			for (const step of steps) {
+				if (step !== 'native') expect(replayStepDef(step).days).toBeGreaterThan(0);
+			}
 		}
 	});
 });

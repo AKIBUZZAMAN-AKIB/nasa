@@ -31,8 +31,10 @@ import {
 	type GibsTimeRange,
 	gibsAvailabilityUrl,
 	gibsLayerById,
+	gibsPeriodMilliseconds,
 	gibsTimeRangesToDayRanges,
 	gibsUrlParams,
+	isSubdailyGibsLayer,
 	isoDayAtNoon,
 	latestAvailableDay,
 	latestAvailableTime,
@@ -43,7 +45,8 @@ import {
 	resolveAvailableDay,
 	resolveAvailableTime,
 	shiftGibsTimestamp,
-	shiftIsoDay
+	shiftIsoDay,
+	shiftIsoMonth
 } from '$lib/gibs';
 import { formatISOWithoutTimezone } from '$lib/time-format';
 
@@ -115,7 +118,7 @@ const inflight = new Map<string, Promise<GibsAvailabilityData>>();
 const DAILY_AVAILABILITY_TTL_MS = 6 * 60 * 60 * 1000;
 const SUBDAILY_AVAILABILITY_TTL_MS = 15 * 60 * 1000;
 const cacheTtl = (layer: GibsLayerDef): number =>
-	layer.period === 'PT30M' ? SUBDAILY_AVAILABILITY_TTL_MS : DAILY_AVAILABILITY_TTL_MS;
+	isSubdailyGibsLayer(layer) ? SUBDAILY_AVAILABILITY_TTL_MS : DAILY_AVAILABILITY_TTL_MS;
 
 const storageKey = (layerId: string): string => `gibs-availability:${layerId}`;
 
@@ -129,7 +132,7 @@ const readCachedAvailability = (layer: GibsLayerDef): CachedAvailability | undef
 		if (!cached || Date.now() - cached.fetchedAt > cacheTtl(layer)) return undefined;
 		if (!Array.isArray(cached.ranges) || cached.ranges.length === 0) return undefined;
 		if (
-			layer.period === 'PT30M' &&
+			isSubdailyGibsLayer(layer) &&
 			(!Array.isArray(cached.timeRanges) || !cached.timeRanges.length)
 		)
 			return undefined;
@@ -156,16 +159,20 @@ const writeCachedAvailability = (layerId: string, data: GibsAvailabilityData): v
 
 /** Today in UTC, the upper bound of the availability window. */
 const todayIso = (): string => new Date().toISOString().slice(0, 10);
+const timeOfDay = (timestamp?: string): string => timestamp?.slice(11, 19) ?? '12:00:00';
 
 /** A real `YYYY-MM-DD` day, rejecting shapes that merely look like one. */
 const isDay = (value: string | undefined): value is string =>
 	!!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && shiftIsoDay(value, 0) === value;
 
 /**
- * Fetch one compact availability response. For IMERG, keep the 30-minute
- * domain compressed and expose a day projection separately for the rail.
+ * Fetch one compact DescribeDomains response. Sub-daily archives stay
+ * compressed as exact timestamp ranges; static catalogue products need no
+ * request, and date-only layers keep their compact availability spans.
  */
 export const loadGibsAvailability = async (layer: GibsLayerDef): Promise<GibsAvailabilityData> => {
+	if (layer.period === 'static') return { ranges: [], timeRanges: [] };
+
 	const cached = availabilityCache.get(layer.id);
 	if (cached && Date.now() - cached.fetchedAt < cacheTtl(layer)) return cached.data;
 	const pending = inflight.get(layer.id);
@@ -179,17 +186,60 @@ export const loadGibsAvailability = async (layer: GibsLayerDef): Promise<GibsAva
 	}
 
 	const request = (async () => {
-		const url = gibsAvailabilityUrl(layer, layer.coverageStart, todayIso());
-		const response = await fetch(url, layer.period === 'PT30M' ? { cache: 'no-store' } : undefined);
+		const url = gibsAvailabilityUrl(
+			layer,
+			layer.availabilityStart ?? layer.coverageStart ?? '0001-01-01',
+			todayIso()
+		);
+		const response = await fetch(
+			url,
+			isSubdailyGibsLayer(layer) ? { cache: 'no-store' } : undefined
+		);
 		if (!response.ok) throw new Error(`GIBS availability request failed (${response.status})`);
 		const xml = await response.text();
-		const data: GibsAvailabilityData =
-			layer.period === 'PT30M'
-				? (() => {
-						const timeRanges = parseGibsTimeAvailability(xml);
-						return { ranges: gibsTimeRangesToDayRanges(timeRanges), timeRanges };
-					})()
-				: { ranges: parseGibsAvailability(xml), timeRanges: [] };
+		let data: GibsAvailabilityData = isSubdailyGibsLayer(layer)
+			? (() => {
+					const timeRanges = parseGibsTimeAvailability(xml);
+					return { ranges: gibsTimeRangesToDayRanges(timeRanges), timeRanges };
+				})()
+			: { ranges: parseGibsAvailability(xml), timeRanges: [] };
+
+		// Some fixed, long-period layers expose a Time dimension in Capabilities
+		// but DescribeDomains returns an empty domain. Use the official default
+		// frame rather than inventing a date or leaving a valid layer blank.
+		if (!data.ranges.length && layer.timeDimension) {
+			const fallback = layer.defaultTime ?? layer.coverageStart;
+			if (isSubdailyGibsLayer(layer)) {
+				const frame = normalizeGibsTimestamp(fallback);
+				if (frame) {
+					const timeRanges = [
+						{
+							start: frame,
+							end: frame,
+							stepMs: gibsPeriodMilliseconds(layer.period) ?? 60_000
+						}
+					];
+					data = { ranges: gibsTimeRangesToDayRanges(timeRanges), timeRanges };
+				}
+			} else if (fallback) {
+				const day = fallback.slice(0, 10);
+				if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+					const dayStep = /^P(\d+)D$/.exec(layer.period);
+					data = {
+						ranges: [
+							{
+								start: day,
+								end: day,
+								stepDays: dayStep ? Number(dayStep[1]) : 1,
+								step: layer.period
+							}
+						],
+						timeRanges: []
+					};
+				}
+			}
+		}
+
 		if (!data.ranges.length) throw new Error('GIBS returned no parseable availability ranges');
 		const fetchedAt = Date.now();
 		availabilityCache.set(layer.id, { fetchedAt, data });
@@ -268,7 +318,7 @@ const applyGibsUrlParams = (): void => {
 const resolve = (announce: boolean): void => {
 	const layer = gibsLayerById(get(gibsLayerId));
 	const { ranges, timeRanges } = get(gibsAvailability);
-	if (!layer || !ranges.length) {
+	if (!layer) {
 		gibsResolvedDate.set(undefined);
 		gibsResolvedTime.set(undefined);
 		gibsLatestDate.set(undefined);
@@ -278,7 +328,26 @@ const resolve = (announce: boolean): void => {
 		return;
 	}
 
-	if (layer.period === 'PT30M') {
+	if (layer.period === 'static') {
+		gibsResolvedDate.set(undefined);
+		gibsResolvedTime.set(undefined);
+		gibsLatestDate.set(undefined);
+		gibsLatestTime.set(undefined);
+		syncGibsUrl();
+		return;
+	}
+
+	if (!ranges.length) {
+		gibsResolvedDate.set(undefined);
+		gibsResolvedTime.set(undefined);
+		gibsLatestDate.set(undefined);
+		gibsLatestTime.set(undefined);
+		syncClock();
+		syncGibsUrl();
+		return;
+	}
+
+	if (isSubdailyGibsLayer(layer)) {
 		const latest = latestAvailableTime(timeRanges);
 		const requested =
 			normalizeGibsTimestamp(get(gibsRequestedTime)) ??
@@ -370,9 +439,9 @@ export const enterGibsBrowse = async (requestedDay?: string): Promise<void> => {
 	gibsBrowse.set(true);
 	if (isDay(requestedDay)) {
 		gibsRequestedDate.set(requestedDay);
-		if (gibsLayerById(get(gibsLayerId))?.period === 'PT30M') {
-			const clock = get(gibsResolvedTime)?.slice(11, 16) ?? '12:00';
-			gibsRequestedTime.set(`${requestedDay}T${clock}:00Z`);
+		if (isSubdailyGibsLayer(gibsLayerById(get(gibsLayerId)))) {
+			const clock = timeOfDay(get(gibsResolvedTime));
+			gibsRequestedTime.set(`${requestedDay}T${clock}Z`);
 		}
 	}
 
@@ -395,10 +464,10 @@ export const exitGibsBrowse = (): void => {
 /** Jump to a specific day (the timeline's date input and slider). */
 export const setGibsDate = (day: string, announce = true): void => {
 	const layer = gibsLayerById(get(gibsLayerId));
-	if (layer?.period === 'PT30M') {
-		const clock =
-			get(gibsResolvedTime)?.slice(11, 16) ?? get(gibsRequestedTime)?.slice(11, 16) ?? '12:00';
-		setGibsTime(`${day}T${clock}:00Z`, announce);
+	if (!layer || layer.period === 'static') return;
+	if (isSubdailyGibsLayer(layer)) {
+		const clock = timeOfDay(get(gibsResolvedTime) ?? get(gibsRequestedTime));
+		setGibsTime(`${day}T${clock}Z`, announce);
 		return;
 	}
 	gibsRequestedDate.set(day);
@@ -424,36 +493,60 @@ export const setGibsTime = (value: string, announce = true): void => {
 
 /** Set the UTC wall-clock time while retaining the day shown on the map. */
 export const setGibsTimeOfDay = (value: string, announce = true): void => {
-	if (!/^\d{2}:\d{2}$/.test(value)) return;
+	if (!/^\d{2}:\d{2}(?::\d{2})?$/.test(value)) return;
 	const day = get(gibsResolvedDate) ?? get(gibsRequestedDate) ?? todayIso();
-	setGibsTime(`${day}T${value}:00Z`, announce);
+	const clock = value.length === 5 ? `${value}:00` : value;
+	setGibsTime(`${day}T${clock}Z`, announce);
 };
 
 /** Replay frame dispatcher: date-only for ordinary layers, UTC timestamp for IMERG. */
 export const setGibsFrame = (frame: string, announce = false): void => {
-	if (gibsLayerById(get(gibsLayerId))?.period === 'PT30M') setGibsTime(frame, announce);
+	if (isSubdailyGibsLayer(gibsLayerById(get(gibsLayerId)))) setGibsTime(frame, announce);
 	else setGibsDate(frame.slice(0, 10), announce);
 };
 
 /** Move the archive selection by one layer-native step. */
 export const shiftGibsDate = (steps: number): void => {
 	const layer = gibsLayerById(get(gibsLayerId));
-	if (layer?.period === 'PT30M') {
+	if (!layer || layer.period === 'static') return;
+	if (isSubdailyGibsLayer(layer)) {
 		const current = get(gibsResolvedTime) ?? get(gibsLatestTime);
-		const shifted = current && shiftGibsTimestamp(current, steps * 30);
+		if (!current) return;
+		const targetMs = Date.parse(current);
+		const ranges = get(gibsAvailability).timeRanges;
+		const range = ranges.find(
+			(entry) => Date.parse(entry.start) <= targetMs && targetMs <= Date.parse(entry.end)
+		);
+		const interval = range?.stepMs ?? gibsPeriodMilliseconds(layer.period) ?? 30 * 60_000;
+		const shifted = shiftGibsTimestamp(current, (steps * interval) / 60_000);
 		if (shifted) setGibsTime(shifted);
 		return;
 	}
+
 	const current = get(gibsResolvedDate) ?? get(gibsRequestedDate) ?? todayIso();
-	// Monthly and 16-day layers move in their own cadence, not by repeated days.
-	const step = layer?.period === 'P1M' ? 30 : layer?.period === 'P16D' ? 16 : 1;
-	setGibsDate(shiftIsoDay(current, steps * step));
+	const range = get(gibsAvailability).ranges.find(
+		(entry) => entry.start <= current && current <= entry.end
+	);
+	const period = range?.step ?? layer.period;
+	const dayStep = /^P(\d+)D$/.exec(period);
+	if (dayStep) {
+		setGibsDate(shiftIsoDay(current, steps * Number(dayStep[1])));
+		return;
+	}
+	const monthStep = /^P(\d+)(M|Y)$/.exec(period);
+	if (monthStep) {
+		const months = Number(monthStep[1]) * (monthStep[2] === 'Y' ? 12 : 1);
+		setGibsDate(shiftIsoMonth(current, steps * months));
+		return;
+	}
+	setGibsDate(shiftIsoDay(current, steps));
 };
 
 /** Show the most recent available day or exact sub-daily frame. */
 export const goToLatestGibs = async (): Promise<void> => {
 	const layer = gibsLayerById(get(gibsLayerId));
-	const cached = layer ? availabilityCache.get(layer.id) : undefined;
+	if (!layer || layer.period === 'static') return;
+	const cached = availabilityCache.get(layer.id);
 	if (
 		get(gibsAvailability).status !== 'ready' ||
 		!layer ||
@@ -461,7 +554,7 @@ export const goToLatestGibs = async (): Promise<void> => {
 		Date.now() - cached.fetchedAt >= cacheTtl(layer)
 	)
 		await activateGibsLayer(undefined, false);
-	if (gibsLayerById(get(gibsLayerId))?.period === 'PT30M') {
+	if (isSubdailyGibsLayer(gibsLayerById(get(gibsLayerId)))) {
 		const latest = latestAvailableTime(get(gibsAvailability).timeRanges);
 		if (latest) setGibsTime(latest, false);
 		return;
@@ -474,14 +567,14 @@ export const goToLatestGibs = async (): Promise<void> => {
 export const selectGibsLayer = (layerId: string): void => {
 	const nextLayer = gibsLayerById(layerId);
 	const currentLayer = gibsLayerById(get(gibsLayerId));
-	if (currentLayer?.period === 'PT30M' && nextLayer?.period !== 'PT30M') {
+	if (isSubdailyGibsLayer(currentLayer) && !isSubdailyGibsLayer(nextLayer)) {
 		gibsRequestedDate.set(get(gibsResolvedDate) ?? get(gibsRequestedDate));
 		gibsRequestedTime.set(undefined);
-	} else if (nextLayer?.period === 'PT30M' && !get(gibsRequestedTime)) {
+	} else if (isSubdailyGibsLayer(nextLayer) && !get(gibsRequestedTime)) {
 		const day = get(gibsRequestedDate) ?? get(gibsResolvedDate);
 		if (day) {
-			const clock = get(gibsResolvedTime)?.slice(11, 16) ?? '12:00';
-			gibsRequestedTime.set(`${day}T${clock}:00Z`);
+			const clock = timeOfDay(get(gibsResolvedTime));
+			gibsRequestedTime.set(`${day}T${clock}Z`);
 		}
 	}
 	void activateGibsLayer(layerId, true);

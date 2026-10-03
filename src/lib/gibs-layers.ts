@@ -36,7 +36,13 @@ import { map as mapStore } from '$lib/stores/map';
 import { preferences } from '$lib/stores/preferences';
 
 import { BEFORE_LAYER_RASTER, HILLSHADE_LAYER } from '$lib/constants';
-import { GIBS_ATTRIBUTION, type GibsLayerDef, gibsLayerById, gibsTileUrl } from '$lib/gibs';
+import {
+	GIBS_ATTRIBUTION,
+	type GibsLayerDef,
+	gibsLayerById,
+	gibsLayerCanRender,
+	gibsTileUrl
+} from '$lib/gibs';
 
 import type * as maplibregl from 'maplibre-gl';
 
@@ -50,7 +56,7 @@ const FADE_MS = 180;
 
 export interface GibsImageryState {
 	status: 'idle' | 'loading' | 'ready' | 'slow' | 'error';
-	/** Exact date or timestamp currently on screen (the one really drawn). */
+	/** Exact date/timestamp currently drawn, or `static` for a timeless layer. */
 	frame?: string;
 }
 
@@ -295,10 +301,11 @@ const pump = async (): Promise<void> => {
 	try {
 		for (;;) {
 			const layer = gibsLayerById(get(gibsLayerId));
-			const frame = get(gibsResolvedTime) ?? get(gibsResolvedDate);
+			const frame =
+				layer?.period === 'static' ? 'static' : (get(gibsResolvedTime) ?? get(gibsResolvedDate));
 			const browsing = get(gibsBrowse);
 
-			if (!browsing || !layer || !frame) {
+			if (!browsing || !layer || !gibsLayerCanRender(layer) || !frame) {
 				hideAll();
 				return;
 			}
@@ -325,9 +332,15 @@ const pump = async (): Promise<void> => {
 			target.busy = false;
 
 			// A newer request landed while this frame was loading: start over.
+			const currentLayer = gibsLayerById(get(gibsLayerId));
+			const currentFrame =
+				currentLayer?.period === 'static'
+					? 'static'
+					: (get(gibsResolvedTime) ?? get(gibsResolvedDate));
 			if (
-				(get(gibsResolvedTime) ?? get(gibsResolvedDate)) !== frame ||
-				gibsLayerById(get(gibsLayerId))?.id !== layer.id ||
+				currentFrame !== frame ||
+				currentLayer?.id !== layer.id ||
+				!gibsLayerCanRender(currentLayer) ||
 				!get(gibsBrowse)
 			) {
 				continue;
@@ -357,7 +370,7 @@ const pump = async (): Promise<void> => {
 export const preloadGibsFrame = (frame: string | undefined): void => {
 	if (!map || !frame || !get(gibsBrowse)) return;
 	const layer = gibsLayerById(get(gibsLayerId));
-	if (!layer) return;
+	if (!layer || layer.period === 'static' || !gibsLayerCanRender(layer)) return;
 	const slot = hidden();
 	if (slot.frame === frame && slot.forLayerId === layer.id) return;
 	// Never disturb the slot the pump is filling, or one that is becoming visible.
@@ -386,7 +399,11 @@ const onMapError = (event: maplibregl.ErrorEvent & { sourceId?: string }): void 
 		return;
 	const slot = slots.find((entry) => entry.sourceId === event.sourceId);
 	if (slot) slot.errored = true;
-	const requestedFrame = get(gibsResolvedTime) ?? get(gibsResolvedDate);
+	const requestedLayer = gibsLayerById(get(gibsLayerId));
+	const requestedFrame =
+		requestedLayer?.period === 'static'
+			? 'static'
+			: (get(gibsResolvedTime) ?? get(gibsResolvedDate));
 	// A preloaded next frame can fail while a different image is on screen.
 	// Keep its error on the slot; don't report it as a failure of the visible frame.
 	if (!slot || slot.frame !== requestedFrame) return;
