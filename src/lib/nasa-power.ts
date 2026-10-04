@@ -75,6 +75,16 @@ export interface PowerValidation {
 	error?: string;
 }
 
+function validateOptionalPowerUser(user?: string): PowerValidation {
+	if (user?.trim() && !/^[A-Za-z0-9]+$/.test(user.trim())) {
+		return {
+			valid: false,
+			error: 'NASA POWER optional user identifiers must contain only letters and numbers.'
+		};
+	}
+	return { valid: true };
+}
+
 export interface PowerParameterMetadata {
 	temporal?: string;
 	type?: string;
@@ -128,6 +138,8 @@ export interface PowerSeriesPoint {
 	key: string;
 	label: string;
 	value: number;
+	/** Position among all returned time keys, including keys omitted as fill values. */
+	sampleIndex: number;
 }
 
 export interface PowerSeries {
@@ -135,6 +147,12 @@ export interface PowerSeries {
 	name: string;
 	unit: string;
 	points: PowerSeriesPoint[];
+	/** Number of non-annual time keys returned by NASA for this parameter. */
+	sampleCount: number;
+	/** Number of finite, non-fill time values. */
+	validCount: number;
+	/** Number of fill, null, or otherwise non-numeric time values omitted from charts. */
+	missingCount: number;
 	annualValue?: number;
 }
 
@@ -400,6 +418,8 @@ function dateForPower(
 }
 
 export function validatePowerTemporalRequest(request: PowerTemporalRequest): PowerValidation {
+	const userValidation = validateOptionalPowerUser(request.user);
+	if (!userValidation.valid) return userValidation;
 	if (!POWER_TEMPORALS.includes(request.temporal)) {
 		return { valid: false, error: 'Choose a supported temporal service.' };
 	}
@@ -538,6 +558,8 @@ export function buildPowerTemporalUrl(request: PowerTemporalRequest): URL {
 }
 
 export function validatePowerApplicationRequest(request: PowerApplicationRequest): PowerValidation {
+	const userValidation = validateOptionalPowerUser(request.user);
+	if (!userValidation.valid) return userValidation;
 	const spatial = request.spatial ?? 'point';
 	if (request.application === 'indicators' || request.application === 'windrose') {
 		if (spatial !== 'point') {
@@ -656,9 +678,57 @@ export function powerApiResourceUrl(path: string): URL {
 }
 
 export function numericPowerValue(value: unknown, fillValue?: unknown): value is number {
+	const fillNumber =
+		typeof fillValue === 'number' && Number.isFinite(fillValue)
+			? fillValue
+			: typeof fillValue === 'string' &&
+				  fillValue.trim() !== '' &&
+				  Number.isFinite(Number(fillValue))
+				? Number(fillValue)
+				: undefined;
 	return (
-		typeof value === 'number' && Number.isFinite(value) && value !== -999 && value !== fillValue
+		typeof value === 'number' &&
+		Number.isFinite(value) &&
+		value !== -999 &&
+		(fillNumber === undefined || value !== fillNumber)
 	);
+}
+
+/** Identify the NASA POWER IMERG family from its live parameter code or definition. */
+export function isPowerImergParameter(
+	code: string,
+	metadata?: Pick<PowerParameterMetadata, 'name' | 'definition'>
+): boolean {
+	const description = `${code} ${metadata?.name ?? ''} ${metadata?.definition ?? ''}`;
+	return /^IMERG_/i.test(code) || /(^|[^A-Z0-9])IMERG([^A-Z0-9]|$)/i.test(description);
+}
+
+/**
+ * Documented native-grid context for source IDs returned by the POWER API.
+ * These notes intentionally use NASA's source-family wording; they are not a
+ * claim that a point request reports its exact grid-cell centre.
+ */
+export function powerSourceResolutionNotes(sources: unknown): string[] {
+	const names = Array.isArray(sources)
+		? sources.filter((source): source is string => typeof source === 'string')
+		: typeof sources === 'string'
+			? [sources]
+			: [];
+	const normalized = names.map((source) => source.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+	const notes: string[] = [];
+
+	if (normalized.some((source) => source.includes('IMERG'))) {
+		notes.push(
+			'IMERG uses a 0.1° × 0.1° source grid (about 10 km); POWER serves it as daily UTC data.'
+		);
+	}
+	if (normalized.some((source) => source.includes('MERRA2') || source.includes('GEOSIT'))) {
+		notes.push('MERRA-2 and GEOS-IT use a 0.5° latitude × 0.625° longitude grid.');
+	}
+	if (normalized.some((source) => source.includes('SYN1DEG'))) {
+		notes.push('SYN1DEG is NASA CERES SYN1deg; NASA identifies its primary solar grid as 1° × 1°.');
+	}
+	return notes;
 }
 
 const periodLabel = (key: string): string => {
@@ -678,45 +748,55 @@ export function powerSeriesFromResponse(response: PowerJsonResponse): PowerSerie
 	const valuesByParameter = response.properties?.parameter;
 	if (!valuesByParameter) return [];
 	const fillValue = response.header?.fill_value;
+	const climatologyOrder = [
+		'JAN',
+		'FEB',
+		'MAR',
+		'APR',
+		'MAY',
+		'JUN',
+		'JUL',
+		'AUG',
+		'SEP',
+		'OCT',
+		'NOV',
+		'DEC'
+	];
+	const isAnnualKey = (key: string) => key === 'ANN' || (/^\d{6}$/.test(key) && key.endsWith('13'));
+	const compareTimeKeys = (a: string, b: string) => {
+		const aMonth = climatologyOrder.indexOf(a);
+		const bMonth = climatologyOrder.indexOf(b);
+		if (aMonth >= 0 && bMonth >= 0) return aMonth - bMonth;
+		return a.localeCompare(b);
+	};
 	const result: PowerSeries[] = [];
 	for (const [code, values] of Object.entries(valuesByParameter)) {
 		if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
 		const metadata = response.parameters?.[code];
-		let annualValue: number | undefined;
+		const entries = Object.entries(values as Record<string, unknown>);
+		const annualEntry = entries.find(([key]) => isAnnualKey(key));
+		const annualValue =
+			annualEntry && numericPowerValue(annualEntry[1], fillValue) ? annualEntry[1] : undefined;
+		const timeEntries = entries
+			.filter(([key]) => !isAnnualKey(key))
+			.sort(([a], [b]) => compareTimeKeys(a, b));
 		const points: PowerSeriesPoint[] = [];
-		for (const [key, value] of Object.entries(values as Record<string, unknown>)) {
-			if (!numericPowerValue(value, fillValue)) continue;
-			if (key === 'ANN' || (/^\d{6}$/.test(key) && key.endsWith('13'))) {
-				annualValue = value;
+		let missingCount = 0;
+		for (const [sampleIndex, [key, value]] of timeEntries.entries()) {
+			if (!numericPowerValue(value, fillValue)) {
+				missingCount += 1;
 				continue;
 			}
-			points.push({ key, label: periodLabel(key), value });
+			points.push({ key, label: periodLabel(key), value, sampleIndex });
 		}
-		const climatologyOrder = [
-			'JAN',
-			'FEB',
-			'MAR',
-			'APR',
-			'MAY',
-			'JUN',
-			'JUL',
-			'AUG',
-			'SEP',
-			'OCT',
-			'NOV',
-			'DEC'
-		];
-		points.sort((a, b) => {
-			const aMonth = climatologyOrder.indexOf(a.key);
-			const bMonth = climatologyOrder.indexOf(b.key);
-			if (aMonth >= 0 && bMonth >= 0) return aMonth - bMonth;
-			return a.key.localeCompare(b.key);
-		});
 		result.push({
 			code,
 			name: metadata?.longname ?? metadata?.name ?? code,
 			unit: metadata?.units ?? metadata?.units_name ?? '',
 			points,
+			sampleCount: timeEntries.length,
+			validCount: points.length,
+			missingCount,
 			annualValue
 		});
 	}
@@ -861,6 +941,8 @@ export function makePowerWindrosePlotUrl(
 ): URL {
 	const validation = validatePowerCoordinate(latitude, longitude);
 	if (!validation.valid) throw new Error(validation.error);
+	const userValidation = validateOptionalPowerUser(user);
+	if (!userValidation.valid) throw new Error(userValidation.error);
 	const url = new URL('/api/application/windrose/plot', NASA_POWER_ORIGIN);
 	url.searchParams.set('latitude', String(latitude));
 	url.searchParams.set('longitude', String(longitude));

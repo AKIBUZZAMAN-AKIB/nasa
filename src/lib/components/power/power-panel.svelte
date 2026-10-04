@@ -46,11 +46,14 @@
 		type PowerCommunity,
 		type PowerJsonResponse,
 		type PowerParameterMetadata,
+		type PowerSeriesPoint,
 		type PowerTemporal,
 		type PowerTemporalRequest,
 		buildPowerApplicationUrl,
 		buildPowerTemporalUrl,
+		isPowerImergParameter,
 		makePowerWindrosePlotUrl,
+		numericPowerValue,
 		powerApiResourceUrl,
 		powerConfigurationUrl,
 		powerJsonError,
@@ -59,6 +62,7 @@
 		powerParameterDetailUrl,
 		powerResponseMessages,
 		powerSeriesFromResponse,
+		powerSourceResolutionNotes,
 		powerSurfaceDetailUrl,
 		validatePowerApplicationRequest,
 		validatePowerCoverageRange,
@@ -235,6 +239,16 @@
 				? '15 parameters per hourly point request'
 				: '20 parameters per point request'
 	);
+	const selectedImergParameters = $derived.by(() =>
+		parameters.filter((code) => isPowerImergParameter(code, parameterCatalog[code]))
+	);
+	const effectiveTimeStandard = $derived(
+		temporal === 'hourly' || temporal === 'daily'
+			? temporal === 'daily' && selectedImergParameters.length > 0
+				? 'utc'
+				: timeStandard
+			: undefined
+	);
 	const temporalRequest = $derived.by((): PowerTemporalRequest => {
 		const timeRange =
 			temporal === 'monthly'
@@ -254,7 +268,7 @@
 			...timeRange,
 			format: dataFormat,
 			units: dataUnits,
-			timeStandard,
+			timeStandard: effectiveTimeStandard,
 			user: apiUser || undefined,
 			header: includeHeader,
 			siteElevation: parseOptional(siteElevation),
@@ -375,16 +389,61 @@
 			const metadata = parameterCatalog[series.code];
 			return {
 				...series,
-				name: metadata?.name ?? series.name,
-				unit: metadata?.units_name ?? metadata?.units ?? series.unit
+				name: series.name || metadata?.name || series.code
+				// Units from the NASA response win: Manager units describe the catalog/default,
+				// while the API may convert them (for example, Celsius to Fahrenheit).
 			};
 		});
 	});
+	const responseSourceIdentifiers = $derived.by(() => {
+		const sources = dataResult?.data?.header?.sources;
+		if (Array.isArray(sources)) return sources.map(String).filter(Boolean);
+		return typeof sources === 'string' && sources.trim() ? [sources.trim()] : [];
+	});
+	const responseResolutionNotes = $derived(
+		powerSourceResolutionNotes(dataResult?.data?.header?.sources)
+	);
+	const responseHasImerg = $derived(
+		responseSourceIdentifiers.some((source) => /IMERG/i.test(source))
+	);
+	const responseHasGeosIt = $derived(
+		responseSourceIdentifiers.some((source) => /GEOS.?IT/i.test(source))
+	);
+	const responseHasBothMeteorologySources = $derived(
+		responseSourceIdentifiers.some((source) => /MERRA.?2/i.test(source)) && responseHasGeosIt
+	);
+	const responseHasEnergyFluxSource = $derived(
+		responseSourceIdentifiers.some((source) => /SYN1DEG|SRB|FLASH.?FLUX|CERES/i.test(source))
+	);
+	const responseHasAllFill = $derived(
+		dataSeries.length > 0 &&
+			dataSeries.every((series) => series.validCount === 0 && series.annualValue === undefined)
+	);
 	const regionalFeatures = $derived(regionalResponse?.features ?? []);
 	const regionalPeriodOptions = $derived.by(() => {
 		const first = regionalFeatures[0]?.properties?.parameter?.[parameters[0]];
 		if (!first || typeof first !== 'object' || Array.isArray(first)) return [];
 		return Object.keys(first as Record<string, unknown>).sort();
+	});
+	const regionalQuality = $derived.by(() => {
+		if (!regionalResponse || !regionalPeriod)
+			return { sampleCount: 0, validCount: 0, missingCount: 0 };
+		const fillValue = regionalResponse.header?.fill_value;
+		const code = parameters[0];
+		let validCount = 0;
+		for (const feature of regionalFeatures) {
+			const rawValues = feature.properties?.parameter?.[code];
+			const value =
+				rawValues && typeof rawValues === 'object' && !Array.isArray(rawValues)
+					? (rawValues as Record<string, unknown>)[regionalPeriod]
+					: undefined;
+			if (numericPowerValue(value, fillValue)) validCount += 1;
+		}
+		return {
+			sampleCount: regionalFeatures.length,
+			validCount,
+			missingCount: regionalFeatures.length - validCount
+		};
 	});
 	const windroseHeights = $derived.by(() => {
 		const parameter = applicationResult?.data?.properties?.parameter as
@@ -913,6 +972,9 @@
 				);
 				return;
 			}
+			if (temporal === 'daily' && isPowerImergParameter(code, parameterCatalog[code])) {
+				timeStandard = 'utc';
+			}
 			parameters = [...parameters, code];
 		} else {
 			parameters = parameters.filter((value) => value !== code);
@@ -1103,7 +1165,7 @@
 			const data = feature.properties?.parameter?.[code];
 			if (!coordinates || coordinates.length < 2 || !data || typeof data !== 'object') continue;
 			const value = (data as Record<string, unknown>)[key];
-			if (typeof value !== 'number' || !Number.isFinite(value) || value === -999) continue;
+			if (!numericPowerValue(value, response.header?.fill_value)) continue;
 			points.push({
 				type: 'Feature',
 				geometry: { type: 'Point', coordinates: [coordinates[0], coordinates[1]] },
@@ -1339,17 +1401,113 @@
 		return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
 	}
 
-	function drawSeriesPath(points: { value: number }[], width: number, height: number): string {
+	function temporalApiLabel(data: PowerJsonResponse): string {
+		const api =
+			data.header?.api && typeof data.header.api === 'object'
+				? (data.header.api as Record<string, unknown>)
+				: {};
+		return [api.name, api.version].filter((value) => typeof value === 'string').join(' · ');
+	}
+
+	function localAccessDate(): string {
+		const date = new Date();
+		return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(
+			date.getDate()
+		).padStart(2, '0')}`;
+	}
+
+	function powerCitationText(data: PowerJsonResponse, requestUrl: string): string {
+		const api =
+			data.header?.api && typeof data.header.api === 'object'
+				? (data.header.api as Record<string, unknown>)
+				: {};
+		const serviceName = typeof api.name === 'string' ? api.name : `POWER ${temporal} API`;
+		const version = typeof api.version === 'string' ? api.version : 'version not reported';
+		const accessDate = localAccessDate();
+		const responsePeriod = [
+			temporalHeaderValue(data, 'start'),
+			temporalHeaderValue(data, 'end')
+		].filter(Boolean);
+		const sources = temporalHeaderValue(data, 'sources') || 'not listed in response';
+		let safeUrl = requestUrl;
+		let requestContext = `Request context: ${temporal} ${spatial} · ${community} · ${parameters.join(', ')}.`;
+		try {
+			const url = new URL(requestUrl);
+			const query = url.searchParams;
+			url.searchParams.delete('user');
+			safeUrl = url.toString();
+			const path = url.pathname.split('/').filter(Boolean);
+			const requestTemporal = path[2] ?? temporal;
+			const requestSpatial = path[3] ?? spatial;
+			const requestParameters = query.get('parameters') ?? parameters.join(', ');
+			const requestCommunity = query.get('community') ?? community;
+			const requestStart = query.get('start');
+			const requestEnd = query.get('end');
+			const location =
+				requestSpatial === 'regional'
+					? `bounds lat ${query.get('latitude-min') ?? 'not reported'}° to ${query.get('latitude-max') ?? 'not reported'}°, lon ${query.get('longitude-min') ?? 'not reported'}° to ${query.get('longitude-max') ?? 'not reported'}°`
+					: `point lat ${query.get('latitude') ?? 'not reported'}°, lon ${query.get('longitude') ?? 'not reported'}°`;
+			const requestDetails = [
+				`${requestTemporal} ${requestSpatial}`,
+				`community ${requestCommunity}`,
+				`parameters ${requestParameters}`,
+				requestStart && requestEnd ? `requested window ${requestStart}–${requestEnd}` : '',
+				location,
+				query.get('format') ? `format ${query.get('format')}` : '',
+				query.get('units') ? `units ${query.get('units')}` : '',
+				query.get('time-standard')
+					? `time standard ${query.get('time-standard')?.toUpperCase()}`
+					: ''
+			].filter(Boolean);
+			requestContext = `Request context: ${requestDetails.join(' · ')}.`;
+		} catch {
+			// Keep the request-state context if a non-URL result is passed in.
+		}
+		return [
+			'POWER reference: The data was obtained from National Aeronautics and Space Administration (NASA) Langley Research Center’s Prediction Of Worldwide Energy Resources (POWER) project funded through the NASA Earth Science Division.',
+			`POWER data reference: The data was obtained from the NASA ${serviceName} (${version}) on ${accessDate}.`,
+			requestContext,
+			...(responsePeriod.length === 2
+				? [`NASA-reported response period: ${responsePeriod[0]}–${responsePeriod[1]}.`]
+				: []),
+			...(temporalHeaderValue(data, 'time_standard')
+				? [`NASA-reported time standard: ${temporalHeaderValue(data, 'time_standard')}.`]
+				: []),
+			`NASA response source identifiers (request-level): ${sources}.`,
+			`Shareable NASA POWER request URL (optional user identifier removed): ${safeUrl}`
+		].join('\n');
+	}
+
+	async function copyCitation(): Promise<void> {
+		if (!dataResult?.data || !dataResult.url) return;
+		try {
+			await navigator.clipboard.writeText(powerCitationText(dataResult.data, dataResult.url));
+			toast.success('NASA POWER citation and request provenance copied.');
+		} catch {
+			toast.error('Could not copy the NASA POWER citation.');
+		}
+	}
+
+	function drawSeriesPath(
+		points: PowerSeriesPoint[],
+		width: number,
+		height: number,
+		totalSamples: number
+	): string {
 		if (points.length < 2) return '';
 		const values = points.map((point) => point.value);
 		const min = Math.min(...values);
 		const max = Math.max(...values);
 		const span = max - min || 1;
+		const lastIndex = Math.max(totalSamples - 1, 1);
 		return points
 			.map((point, index) => {
-				const x = (index / (points.length - 1)) * width;
+				const sampleIndex = point.sampleIndex ?? index;
+				const previousIndex = points[index - 1]?.sampleIndex ?? index - 1;
+				const beginsSegment = index === 0 || sampleIndex - previousIndex > 1;
+				const x = (sampleIndex / lastIndex) * width;
 				const y = height - ((point.value - min) / span) * height;
-				return `${index ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`;
+				return `${beginsSegment ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
 			})
 			.join(' ');
 	}
@@ -1371,12 +1529,15 @@
 </script>
 
 {#if panelIsOpen}
+	<!-- Keep the panel anchor independent of the credit offset: attribution.ts moves credits around
+	     this blocker, so using that same offset here creates a runaway position feedback loop. -->
 	<aside
 		transition:fly={{ y: 12, duration: 180 }}
 		data-credit-blocker
 		aria-label="NASA POWER data explorer"
-		class="fixed right-2 z-80 flex max-h-[78dvh] w-[min(94vw,34rem)] flex-col overflow-hidden rounded-lg border bg-glass/95 shadow-xl backdrop-blur-md"
-		style:bottom="max(7.5rem, calc(var(--om-credit-bottom) + var(--om-credit-height) + 0.5rem))"
+		class="fixed right-2 z-80 flex w-[min(94vw,34rem)] flex-col overflow-hidden rounded-lg border bg-glass/95 shadow-xl backdrop-blur-md"
+		style:bottom="7.5rem"
+		style:max-height="min(78dvh, calc(100dvh - 9rem))"
 	>
 		<header class="flex items-start justify-between gap-3 border-b px-3 py-2.5">
 			<div class="min-w-0">
@@ -1436,16 +1597,90 @@
 		<div class="min-h-0 flex-1 overflow-y-auto">
 			{#if activeTab === 'data'}
 				<div class="space-y-3 p-3">
-					<p
-						class="rounded border bg-black/[0.025] px-2 py-1.5 text-[0.63rem] leading-snug opacity-75 dark:bg-white/[0.035]"
+					<section
+						class="rounded-lg border border-sky-500/25 bg-sky-500/[0.045] px-2.5 py-2 text-[0.67rem] leading-snug"
 					>
-						POWER provides gridded satellite/reanalysis estimates, not station observations. NASA's
-						service guide lists about 0.5° × 0.625° meteorology and 1° × 1° solar data; a point
-						coordinate does not create finer native resolution. Near-real-time data may later be
-						superseded by climate-quality updates. Avoid rapid/repetitive calls: NASA documents HTTP
-						429 and says excessive synchronous requests may be blocked; it publishes no fixed
-						per-minute threshold in the current guide. For bulk use the separate AWS archive.
-					</p>
+						<div class="flex items-start justify-between gap-2">
+							<div>
+								<h2 class="font-semibold">
+									Research with grid estimates, not station observations
+								</h2>
+								<p class="mt-0.5 opacity-75">
+									A point coordinate does not create finer source resolution. This panel will show
+									NASA's response sources, returned units and valid/fill counts after each fetch.
+								</p>
+							</div>
+							<span
+								class="shrink-0 rounded-full border px-1.5 py-0.5 text-[0.58rem] font-medium opacity-70"
+								>NASA POWER</span
+							>
+						</div>
+						<details class="mt-1.5 rounded border border-sky-500/15 px-2 py-1.5">
+							<summary class="cursor-pointer font-medium"
+								>Method notes & responsible interpretation</summary
+							>
+							<ul class="mt-1 list-disc space-y-1 pl-4 opacity-75">
+								<li>
+									POWER values are source-grid estimates, not local station measurements. Native
+									resolution is parameter/source-specific; NASA documents common grids of 1° CERES
+									SYN1deg, 0.5° × 0.625° MERRA-2/GEOS-IT and 0.1° × 0.1° IMERG. The response source
+									list and parameter definition determine which context applies.
+								</li>
+								<li>
+									The live date window is service-wide, not a promise that every parameter has
+									complete values. NASA's <code>fill_value</code> is excluded from charts; valid and missing
+									samples are counted below. HTTP 200 alone does not mean usable data.
+								</li>
+								<li>
+									LST applies to Hourly and Daily only: a 15° solar-time band, not civil time.
+									Monthly and Climatology use UTC. NASA POWER serves IMERG products daily in UTC
+									only.
+								</li>
+								<li>
+									For climate trends, check upstream source transitions and near-real-time
+									revisions. NASA recommends a 2-month NRT cutoff for meteorology and 3.5 months for
+									IMERG precipitation; it discourages energy-flux trend analysis across source
+									changes.
+								</li>
+								<li>
+									There is no single accuracy number for every parameter/site/period. NASA publishes
+									parameter-specific comparison methods; do not treat a grid value as guaranteed
+									site accuracy.
+								</li>
+								<li>
+									Avoid unnecessary rapid or repeated API calls: NASA documents HTTP 429 and
+									possible blocking for excessive synchronous use, but no fixed per-minute quota.
+									Use the separate bulk archive for large extractions.
+								</li>
+							</ul>
+							<div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t pt-1.5">
+								<a
+									class="underline"
+									href="https://power.larc.nasa.gov/docs/methodology/data/sources/"
+									target="_blank"
+									rel="noreferrer">NASA data sources & latency</a
+								>
+								<a
+									class="underline"
+									href="https://power.larc.nasa.gov/docs/faqs/data/"
+									target="_blank"
+									rel="noreferrer">Data, units & quality FAQ</a
+								>
+								<a
+									class="underline"
+									href="https://power.larc.nasa.gov/docs/methodology/"
+									target="_blank"
+									rel="noreferrer">Methodology & validation</a
+								>
+								<a
+									class="underline"
+									href="https://power.larc.nasa.gov/docs/referencing/"
+									target="_blank"
+									rel="noreferrer">NASA citing guide</a
+								>
+							</div>
+						</details>
+					</section>
 					<div class="grid grid-cols-2 gap-2">
 						<label class="block">
 							<span class="text-[0.67rem] opacity-70">Temporal API</span>
@@ -1540,7 +1775,10 @@
 										<span class="min-w-0 flex-1">
 											<span class="font-mono font-semibold">{code}</span>
 											<span class="ml-1 opacity-70">{metadata.name ?? code}</span>
-											{#if metadata.units}<span class="ml-1 opacity-50">({metadata.units})</span
+											{#if metadata.units}<span
+													class="ml-1 opacity-50"
+													title="NASA Manager catalog unit; the API result may convert this to the requested units."
+													>({metadata.units})</span
 												>{/if}
 										</span>
 									</label>
@@ -1550,10 +1788,67 @@
 							</div>
 							<p class="mt-1 opacity-55">
 								Showing {Math.min(filteredParameters.length, 80)} of {filteredParameters.length.toLocaleString()}
-								matches. Metadata is served live by NASA POWER Manager.
+								matches. Metadata is served live by NASA POWER Manager; units here are catalog defaults,
+								while result units come from the response.
 							</p>
 						{/if}
+						{#if parameters.length && !parameterCatalogLoading}
+							<details class="mt-2 rounded border px-2 py-1.5">
+								<summary class="cursor-pointer font-medium"
+									>Selected parameter definitions · live NASA Manager</summary
+								>
+								<div class="mt-1.5 space-y-2">
+									{#each parameters as code (code)}
+										{@const metadata = parameterCatalog[code]}
+										<div class="border-t pt-1.5 first:border-0 first:pt-0">
+											<p><code class="font-semibold">{code}</code> · {metadata?.name ?? code}</p>
+											<p class="mt-0.5 opacity-70">
+												{metadata?.definition ?? 'NASA Manager did not return a definition.'}
+											</p>
+											<p class="mt-0.5 opacity-55">
+												Catalog type: {metadata?.type ?? 'not reported'} · catalog unit: {metadata?.units ??
+													'not reported'}
+												{#if metadata?.source === 'SOURCE'}
+													· Manager source tag <code>SOURCE</code> is generic, not a dataset identifier.{:else if metadata?.source}
+													· Manager source tag: <code>{metadata.source}</code>{/if}
+											</p>
+										</div>
+									{/each}
+								</div>
+								<p class="mt-1.5 border-t pt-1.5 opacity-55">
+									The Manager catalog is useful for definitions and default units, but its service
+									window is not per-parameter completeness. Check the actual response source IDs,
+									units and valid-value counts below.
+									<a
+										class="ml-1 underline"
+										href="https://power.larc.nasa.gov/docs/services/api/system/manager/"
+										target="_blank"
+										rel="noreferrer">Manager documentation</a
+									>
+								</p>
+							</details>
+						{/if}
 					</div>
+
+					{#if selectedImergParameters.length && temporal === 'daily'}
+						<div
+							class="rounded border border-amber-500/35 bg-amber-500/[0.08] px-2.5 py-2 text-[0.65rem] leading-snug"
+							role="note"
+						>
+							<strong>IMERG constraint applied: Daily · UTC only.</strong>
+							<span class="block mt-0.5 opacity-80">
+								NASA documents IMERG at 0.1° × 0.1° (about 10 km), daily and UTC only. LST is
+								disabled for this selection. Near-real-time values may mix Late and Final runs; NASA
+								recommends ending climate-trend analyses at least 3.5 months before NRT.
+							</span>
+							<a
+								class="mt-1 inline-flex underline"
+								href="https://power.larc.nasa.gov/docs/methodology/data/sources/"
+								target="_blank"
+								rel="noreferrer">Read NASA's IMERG source & latency notes</a
+							>
+						</div>
+					{/if}
 
 					{#if spatial === 'point'}
 						<div class="space-y-1.5 rounded border px-2 py-1.5">
@@ -1777,18 +2072,24 @@
 							>{/if}
 					</div>
 
-					{#if !specializedHourlyFormat}
+					{#if !specializedHourlyFormat && (temporal === 'hourly' || temporal === 'daily')}
 						<label class="block"
 							><span class="text-[0.67rem] opacity-70">Time standard</span><select
 								class="mt-0.5 w-full rounded border bg-transparent px-1.5 py-1.5 text-xs"
-								bind:value={timeStandard}
-								><option value="lst">LST · Local Solar Time</option><option value="utc">UTC</option
-								></select
+								value={effectiveTimeStandard}
+								onchange={(event) => (timeStandard = event.currentTarget.value as 'lst' | 'utc')}
+								><option
+									value="lst"
+									disabled={temporal === 'daily' && selectedImergParameters.length > 0}
+									>LST · Local Solar Time</option
+								><option value="utc">UTC</option></select
 							></label
 						>
 						<p class="-mt-2 text-[0.62rem] leading-tight opacity-55">
-							LST is a 15° solar-time band—not the location's civil timezone. POWER's default is
-							LST.
+							{#if temporal === 'hourly'}NASA hourly timestamps mark the start of each hour.
+							{/if}
+							LST is a 15° longitude-band solar time, not civil time. Monthly and Climatology use UTC;
+							Daily IMERG is UTC only.
 						</p>
 					{/if}
 					{#if specializedHourlyFormat}
@@ -1872,14 +2173,16 @@
 								<input
 									type="text"
 									autocomplete="off"
+									pattern="[A-Za-z0-9]*"
+									title="Use letters and numbers only."
 									class="mt-0.5 w-full rounded border bg-transparent px-1.5 py-1 text-xs"
 									bind:value={apiUser}
-									placeholder="For request identification only"
+									placeholder="Letters and numbers only"
 								/>
 							</label>
 							<p class="text-[0.6rem] opacity-50">
-								Sent as NASA's optional <code>user</code> query parameter; it is not an account or authentication
-								token.
+								Sent as NASA's optional <code>user</code> query parameter; use letters and numbers only.
+								It is not an account name or authentication token.
 							</p>
 						</div>
 					</details>
@@ -1888,7 +2191,9 @@
 						<p class="text-[0.62rem] opacity-50">
 							{temporalConfig.documentation.title} · {temporalConfig.documentation
 								.version}{#if displayedSettings(temporalConfig)}
-								· live coverage: {displayedSettings(temporalConfig)}{/if}
+								· service date window (not per-parameter completeness): {displayedSettings(
+									temporalConfig
+								)}{/if}
 						</p>
 					{/if}
 
@@ -1948,61 +2253,213 @@
 						</p>{/if}
 
 					{#if dataResult?.status === 'success' && dataResult.data}
-						<section class="space-y-2 border-t pt-2" aria-label="NASA POWER temporal result">
-							<div class="flex items-start justify-between gap-2">
-								<div>
+						<section
+							class="space-y-2 border-t pt-2"
+							aria-label="NASA POWER temporal result"
+							aria-live="polite"
+						>
+							<div
+								class="flex items-start justify-between gap-2 rounded-lg border bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.025]"
+							>
+								<div class="min-w-0">
 									<h3 class="text-xs font-semibold">
 										{temporalConfig?.documentation?.title ?? 'NASA POWER result'}
 									</h3>
 									<p class="text-[0.64rem] opacity-55">
 										{temporalHeaderValue(dataResult.data, 'title')}
 									</p>
+									<p class="mt-0.5 text-[0.62rem] opacity-65">
+										{temporalApiLabel(dataResult.data) || 'API version not reported'}
+									</p>
 								</div>
-								<button
-									type="button"
-									class="shrink-0 rounded border px-1.5 py-1 text-[0.62rem]"
-									onclick={() => void copyUrl(dataResult?.url ?? '')}
-									><Copy size={12} class="inline" /> Copy URL</button
-								>
+								<div class="flex shrink-0 flex-wrap justify-end gap-1">
+									<button
+										type="button"
+										class="rounded border px-1.5 py-1 text-[0.62rem]"
+										title="Copy exact NASA request URL"
+										aria-label="Copy exact NASA POWER request URL"
+										onclick={() => void copyUrl(dataResult?.url ?? '')}
+										><Copy size={12} class="inline" /> Copy URL</button
+									>
+									<button
+										type="button"
+										class="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-1 text-[0.62rem] font-medium"
+										title="Copy NASA's recommended reference and response provenance"
+										aria-label="Copy NASA POWER citation"
+										onclick={() => void copyCitation()}
+										><Copy size={12} class="inline" /> Copy citation</button
+									>
+								</div>
 							</div>
-							{#if dataResult.data.geometry?.coordinates}
+
+							<div class="space-y-1 rounded-lg border px-2 py-1.5 text-[0.64rem]">
+								<div class="flex flex-wrap items-center gap-1.5">
+									<strong>NASA response source IDs</strong>
+									{#if responseSourceIdentifiers.length}
+										{#each responseSourceIdentifiers as source (source)}<span
+												class="rounded-full bg-sky-500/10 px-1.5 py-0.5 font-mono">{source}</span
+											>{/each}
+									{:else}<span
+											class="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-amber-900 dark:text-amber-100"
+											>none reported</span
+										>{/if}
+								</div>
+								{#if parameters.length > 1 && responseSourceIdentifiers.length}
+									<p class="opacity-60">
+										The <code>header.sources</code> list applies to this whole response; NASA does not
+										map each source ID to an individual parameter here.
+									</p>
+								{/if}
+								{#each responseResolutionNotes as note (note)}<p class="opacity-75">
+										{note}
+									</p>{/each}
+								{#if selectedImergParameters.length || responseHasImerg}
+									<p class="rounded bg-amber-500/[0.08] px-1.5 py-1">
+										IMERG trend caution: NASA says recent daily series may mix Late and Final runs;
+										end climate-trend analysis at least 3.5 months before NRT.
+									</p>
+								{:else if responseHasGeosIt}
+									<p class="rounded bg-amber-500/[0.08] px-1.5 py-1">
+										Meteorology trend caution: this response reports near-real-time GEOS-IT. NASA
+										recommends ending climate-trend analysis at least 2 months before NRT.{#if responseHasBothMeteorologySources}
+											This response also reports MERRA-2; verify the source transition for the
+											requested period.{/if}
+									</p>
+								{/if}
+								{#if responseHasEnergyFluxSource}
+									<p class="rounded bg-amber-500/[0.08] px-1.5 py-1">
+										Energy-flux series may span SRB, CERES and FLASHFlux products; NASA advises
+										against climate-trend analysis across a source-data change.
+									</p>
+								{/if}
+								<p class="border-t pt-1 opacity-60">
+									No universal error bar is inferred here. NASA's accuracy evaluations are
+									parameter-specific; validate against appropriate local observations when
+									site-level accuracy matters.
+								</p>
+							</div>
+
+							{#if spatial === 'point'}
+								<div
+									class="grid gap-1.5 rounded-lg border border-sky-500/20 bg-sky-500/[0.035] px-2 py-1.5 text-[0.64rem] sm:grid-cols-2"
+								>
+									<div>
+										<p class="font-medium">Selected request point</p>
+										<p class="font-mono opacity-75">lat {latitude}° · lon {longitude}°</p>
+									</div>
+									{#if dataResult.data.geometry?.coordinates}
+										<div>
+											<p class="font-medium">NASA-reported point geometry</p>
+											<p class="font-mono opacity-75">
+												lon {dataResult.data.geometry.coordinates[0]}° · lat {dataResult.data
+													.geometry
+													.coordinates[1]}°{#if dataResult.data.geometry.coordinates[2] !== undefined}<br
+													/>elevation {dataResult.data.geometry.coordinates[2]} m (NASA-reported){/if}
+											</p>
+										</div>
+									{/if}
+									<p class="col-span-full opacity-70">
+										The point-response geometry is not a verified grid-cell centre. POWER values
+										represent source-grid estimates; complex-terrain grid elevation can differ from
+										a local site.
+									</p>
+								</div>
+							{:else}
+								<div class="rounded-lg border px-2 py-1.5 text-[0.64rem]">
+									<p class="font-medium">Regional request bounds · API-returned locations</p>
+									<p class="font-mono opacity-75">
+										lat {latitudeMin}° to {latitudeMax}° · lon {longitudeMin}° to {longitudeMax}°
+									</p>
+									<p class="mt-0.5 opacity-65">
+										NASA GeoJSON feature coordinates are displayed as sample-point markers, not a
+										continuous or interpolated raster. Spacing depends on source.
+									</p>
+								</div>
+							{/if}
+
+							{#if temporalHeaderValue(dataResult.data, 'time_standard')}
 								<p class="text-[0.64rem] opacity-60">
-									NASA response grid coordinate (lon, lat, elevation): {dataResult.data.geometry.coordinates
-										.map((value) => Number(value).toFixed(3))
-										.join(', ')}
+									NASA time standard: <strong
+										>{temporalHeaderValue(dataResult.data, 'time_standard')}</strong
+									>. LST is solar time, not local civil time.
 								</p>
 							{/if}
-							{#if temporalHeaderValue(dataResult.data, 'time_standard')}<p
-									class="text-[0.64rem] opacity-60"
+							{#if responseHasAllFill}
+								<div
+									class="rounded border border-red-500/35 bg-red-500/[0.08] px-2 py-1.5 text-[0.67rem] text-red-900 dark:text-red-100"
+									role="alert"
 								>
-									NASA time standard: {temporalHeaderValue(dataResult.data, 'time_standard')}. This
-									is not necessarily local civil time.
-								</p>{/if}
+									<strong>No valid parameter values were returned.</strong> NASA may return HTTP 200
+									with only fill values or empty series. Check the selected date range, source
+									availability and reported fill value ({temporalHeaderValue(
+										dataResult.data,
+										'fill_value'
+									) || 'not provided'}).
+								</div>
+							{/if}
+							<details class="rounded-lg border px-2 py-1.5 text-[0.64rem]">
+								<summary class="cursor-pointer font-medium"
+									>Citation preview & complete request context</summary
+								>
+								<pre
+									class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all">{powerCitationText(
+										dataResult.data,
+										dataResult.url
+									)}</pre>
+								<a
+									class="mt-1 inline-flex items-center gap-1 underline"
+									href="https://power.larc.nasa.gov/docs/referencing/"
+									target="_blank"
+									rel="noreferrer"><ExternalLink size={11} /> NASA POWER referencing guide</a
+								>
+							</details>
 							{#if dataSeries.length}
 								{#each dataSeries as series (series.code)}
-									<article class="rounded border px-2 py-1.5">
+									<article class="rounded-lg border px-2.5 py-2">
 										<div class="flex items-start justify-between gap-2">
 											<div class="min-w-0">
-												<h4 class="truncate text-[0.7rem] font-semibold">
+												<h4 class="truncate text-[0.72rem] font-semibold">
 													{series.name} <span class="font-mono opacity-55">{series.code}</span>
 												</h4>
-												<p class="text-[0.62rem] opacity-55">
-													{series.unit}{#if series.annualValue !== undefined}
+												<p class="text-[0.63rem] opacity-65">
+													NASA-reported unit: <strong>{series.unit || 'not returned'}</strong>
+													{#if series.annualValue !== undefined}
 														· annual {series.annualValue}{series.unit ? ` ${series.unit}` : ''}{/if}
 												</p>
 											</div>
-											<span class="shrink-0 text-[0.62rem] opacity-55"
-												>{series.points.length} valid values</span
+											<span
+												class="shrink-0 rounded-full bg-sky-500/10 px-1.5 py-0.5 text-[0.62rem] font-medium"
 											>
+												{series.validCount}/{series.sampleCount} valid
+											</span>
 										</div>
+										<div class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[0.62rem] opacity-65">
+											<span
+												>{series.missingCount} fill/missing sample{series.missingCount === 1
+													? ''
+													: 's'}</span
+											>
+											{#if series.points.length}<span
+													>valid keys {series.points[0].label}–{series.points[
+														series.points.length - 1
+													].label}</span
+												>{/if}
+										</div>
+										{#if series.missingCount > 0}
+											<p class="mt-1 text-[0.62rem] text-amber-900 dark:text-amber-100">
+												NASA fill value {temporalHeaderValue(dataResult.data, 'fill_value') ||
+													'not reported'} and other non-numeric values are omitted; chart segments break
+												at missing keys.
+											</p>
+										{/if}
 										{#if series.points.length > 1}
 											<svg
 												viewBox="0 0 280 52"
 												class="mt-1 h-12 w-full"
 												role="img"
-												aria-label={`${series.name} time series`}
+												aria-label={`${series.name} time series; ${series.validCount} valid samples out of ${series.sampleCount}; missing keys create gaps`}
 												><path
-													d={drawSeriesPath(series.points, 280, 45)}
+													d={drawSeriesPath(series.points, 280, 45, series.sampleCount)}
 													fill="none"
 													stroke="currentColor"
 													stroke-width="1.6"
@@ -2011,12 +2468,26 @@
 												/></svg
 											>
 										{/if}
-										<div class="max-h-24 overflow-auto">
+										{#if series.points.length === 0 && series.annualValue === undefined}
+											<p
+												class="mt-1 rounded bg-red-500/[0.08] px-1.5 py-1 text-[0.63rem]"
+												role="note"
+											>
+												No valid samples in this response window. Review NASA source IDs, dates and
+												fill metadata before interpreting the request as a successful dataset.
+											</p>
+										{:else if series.points.length === 0}
+											<p class="mt-1 text-[0.62rem] opacity-70">
+												NASA returned an annual aggregate, but no valid individual time keys for
+												this window.
+											</p>
+										{/if}
+										<div class="max-h-28 overflow-auto">
 											<table class="w-full text-[0.62rem]">
 												<thead
 													><tr class="opacity-55"
 														><th class="py-0.5 text-left font-normal">Time key</th><th
-															class="py-0.5 text-right font-normal">Value</th
+															class="py-0.5 text-right font-normal">NASA value</th
 														></tr
 													></thead
 												><tbody
@@ -2033,23 +2504,42 @@
 									</article>
 								{/each}
 							{:else if spatial === 'regional' && regionalFeatures.length}
-								<div class="rounded border px-2 py-1.5">
+								<div class="rounded-lg border px-2.5 py-2">
 									<div class="flex items-center justify-between gap-2">
 										<h4 class="text-[0.7rem] font-semibold">
-											Regional grid: {regionalFeatures.length.toLocaleString()} returned cells
+											NASA returned {regionalFeatures.length.toLocaleString()} sample locations
 										</h4>
-										<label class="flex items-center gap-1 text-[0.62rem]"
-											><input
+										<label class="flex items-center gap-1 text-[0.62rem]">
+											<input
 												type="checkbox"
 												class="accent-sky-500"
 												bind:checked={$powerGridVisible}
-											/> Show on map</label
-										>
+											/> Show on map
+										</label>
 									</div>
-									<p class="mt-0.5 text-[0.62rem] opacity-60">
-										Markers are NASA response grid-cell centres, not interpolated pixels. Elevation
-										and grid spacing vary by source.
+									<p class="mt-0.5 text-[0.62rem] opacity-65">
+										NASA feature coordinates are plotted as sample-point markers, not interpolated
+										pixels or a continuous raster. Source and parameter determine spacing.
 									</p>
+									{#if regionalPeriod}
+										<p class="mt-1 text-[0.63rem]">
+											Map slice <code>{regionalPeriod}</code>:
+											<strong>{regionalQuality.validCount}/{regionalQuality.sampleCount}</strong>
+											valid locations · {regionalQuality.missingCount} fill/missing.
+										</p>
+										{#if regionalQuality.sampleCount > 0 && regionalQuality.validCount === 0}
+											<p
+												class="mt-1 rounded bg-red-500/[0.08] px-1.5 py-1 text-[0.63rem]"
+												role="alert"
+											>
+												All returned locations are missing/fill for this slice; no values are drawn
+												on the map. NASA fill value: {temporalHeaderValue(
+													dataResult.data,
+													'fill_value'
+												) || 'not reported'}.
+											</p>
+										{/if}
+									{/if}
 									{#if regionalPeriodOptions.length}
 										<label class="mt-1 flex items-center gap-1 text-[0.64rem]"
 											>Map time slice <select
@@ -2067,23 +2557,39 @@
 											)}–{$powerGridOverlay.max.toFixed(2)}
 											{$powerGridOverlay.unit}
 										</p>{/if}
-									<div
-										class="mt-1 flex items-center justify-between gap-1 text-[0.6rem] opacity-55"
-									>
-										<span>Low · {$powerGridOverlay?.min.toFixed(2) ?? '—'}</span>
+									{#if $powerGridOverlay}
 										<div
-											class="h-2 flex-1 rounded"
-											style="background:linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725)"
-										></div>
-										<span>High · {$powerGridOverlay?.max.toFixed(2) ?? '—'}</span>
-									</div>
-									<button
-										type="button"
-										class="mt-1 rounded border px-1.5 py-1 text-[0.62rem] hover:bg-black/5 dark:hover:bg-white/10"
-										onclick={clearPowerGridOverlay}
-										><Layers3 size={12} class="inline" /> Clear map layer</button
-									>
+											class="mt-1 flex items-center justify-between gap-1 text-[0.6rem] opacity-65"
+											aria-label="Map value range legend"
+										>
+											<span>Low · {$powerGridOverlay.min.toFixed(2)} {$powerGridOverlay.unit}</span>
+											<div
+												class="h-2 flex-1 rounded"
+												style="background:linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725)"
+											></div>
+											<span>High · {$powerGridOverlay.max.toFixed(2)} {$powerGridOverlay.unit}</span
+											>
+										</div>
+										<button
+											type="button"
+											class="mt-1 rounded border px-1.5 py-1 text-[0.62rem] hover:bg-black/5 dark:hover:bg-white/10"
+											onclick={clearPowerGridOverlay}
+											><Layers3 size={12} class="inline" /> Clear map layer</button
+										>
+									{/if}
 								</div>
+							{/if}
+							{#if !dataSeries.length && spatial === 'regional' && !regionalFeatures.length}
+								<p class="rounded border px-2 py-1.5 text-[0.66rem] opacity-75" role="note">
+									NASA returned no regional GeoJSON features. Check dates, parameter and source
+									availability; service-wide date bounds do not guarantee parameter-level
+									completeness.
+								</p>
+							{:else if !dataSeries.length && spatial === 'point'}
+								<p class="rounded border px-2 py-1.5 text-[0.66rem] opacity-75" role="note">
+									NASA returned no time-series parameter object. Open the exact request URL or
+									inspect the raw response to diagnose the service response.
+								</p>
 							{/if}
 							{#if regionalFeatures.length <= 500}
 								<details class="rounded border px-2 py-1 text-[0.62rem]">
@@ -2100,8 +2606,8 @@
 									class="flex items-center justify-between gap-2 rounded border px-2 py-1.5 text-[0.62rem]"
 								>
 									<span
-										>Large regional response ({regionalFeatures.length.toLocaleString()} cells); open
-										the direct NASA JSON URL to inspect all features.</span
+										>Large regional response ({regionalFeatures.length.toLocaleString()} sample locations);
+										open the direct NASA JSON URL to inspect all features.</span
 									>
 									<a
 										href={dataResult.url}
@@ -2319,14 +2825,16 @@
 						<input
 							type="text"
 							autocomplete="off"
+							pattern="[A-Za-z0-9]*"
+							title="Use letters and numbers only."
 							class="mt-0.5 w-full rounded border bg-transparent px-1.5 py-1 text-xs"
 							bind:value={apiUser}
-							placeholder="For request identification only"
+							placeholder="Letters and numbers only"
 						/>
 					</label>
 					<p class="text-[0.6rem] opacity-50">
-						Sent as NASA's optional <code>user</code> query parameter; it is not an account or authentication
-						token.
+						Sent as NASA's optional <code>user</code> query parameter; use letters and numbers only. It
+						is not an account name or authentication token.
 					</p>
 					{#if applicationConfig?.documentation?.version}<p class="text-[0.62rem] opacity-50">
 							{applicationConfig.documentation.title} · {applicationConfig.documentation

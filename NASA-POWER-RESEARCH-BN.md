@@ -116,6 +116,39 @@ Form-এর date/year `min`/`max` এবং request validation এই bounds-ক
 - `src/lib/tests/nasa-power.test.ts` — request, bounds, date, error, annual/climatology helper tests।
 - `src/routes/+page.svelte`-এ map control ও panel যুক্ত; Historical panel-এর সঙ্গে একবারে একটি panel খোলা থাকে।
 
+## অতিরিক্ত যাচাই ও UI সিদ্ধান্ত — ৪ অক্টোবর ২০২৬
+
+### IMERG ও Daily/UTC সীমা
+
+- Live NASA Manager-এর Daily `AG` catalog-এ `IMERG_PRECTOT` আছে; definition-এ IMERG উল্লেখ এবং catalog unit `mm/day`। Manager-এর `source: SOURCE` field একা নির্দিষ্ট dataset ID নয়। Actual Daily JSON response-এ `header.sources: ["IMERG"]`, `header.fill_value: -999`, `time_standard: "UTC"`, এবং parameter response unit `mm/day` এসেছে।
+- একই Dhaka point ও ২০২৪-০১-০১–০৩ সময়সীমায় `time-standard=UTC` request HTTP 200 দিয়ে ৩টি numeric sample দিয়েছে; `time-standard=LST` request-ও HTTP 200 হলেও `sources: []` এবং তিনটিই `-999` fill দিয়েছে। তাই UI-তে Daily IMERG থাকলে UTC বাধ্যতামূলক/দৃশ্যমান এবং LST নিষ্ক্রিয় রাখা হয়েছে—HTTP 200-কে valid data ধরে নেওয়া যাবে না।
+- NASA Data Sources methodology IMERG-এর 0.1° × 0.1° (~10 km) native grid, Daily-only এবং UTC-only availability, Final Run-এর প্রায় 3.5-মাস latency, Late Run-এর প্রায় 14-ঘণ্টা latency, এবং NRT অংশে Late/Final মিশে যাওয়ার কথা জানায়। Climate-trend বিশ্লেষণের জন্য NASA অন্তত 3.5 মাস NRT-এর পেছনে শেষ করার পরামর্শ দেয়।
+- 2° × 2° Dhaka-area regional IMERG probe-এ HTTP 200, `sources: ["IMERG"]` এবং 400 GeoJSON feature পাওয়া যায়। Regional ফলাফলও API-returned sample location; UI এটি continuous/interpolated raster হিসেবে দেখায় না।
+
+### Coordinates, sources, units ও completeness
+
+- Point request-এ পাঠানো 90.4125°E, 23.8103°N-এর NASA `geometry.coordinates` ছিল `[90.412, 23.81, 10.06]`; এটি requested point-এর API geometry, যাচাইকৃত grid-cell centre নয়। একই এলাকার Regional T2M feature-এ পৃথক feature coordinates এসেছে। UI তাই selected request point ও NASA-reported point geometry আলাদা করে দেখায় এবং point geometry-কে cell centre বলে দাবি করে না। NASA FAQ-ও elevation/grid-cell average-কে local site elevation-এর সমান ধরে নিতে নিষেধ করে।
+- Daily T2M 2024-01-01 probe-এ `header.sources: ["MERRA2"]`; 2026-09-01–03 probe-এ `["GEOSIT", "MERRA2"]`—অর্থাৎ এক response period-এ source transition থাকতে পারে। NASA docs MERRA-2/GEOS-IT grid 0.5° latitude × 0.625° longitude বলে এবং climate-trend কাজে NRT থেকে 2 মাস পিছিয়ে শেষ করার পরামর্শ দেয়। `ALLSKY_SFC_SW_DWN` 2024-01 probe-এ `SYN1DEG` source ID এসেছে; NASA CERES SYN1deg-কে primary 1° × 1° solar grid হিসেবে രേഖ করে। UI resolution hint-কে returned source ID-র সঙ্গে যুক্ত করে; unknown source-এ resolution অনুমান করে না।
+- T2M `units=metric` response-এ unit `C`, value 17.76; `units=imperial` response-এ unit `F`, value 63.97. Manager catalog unit API request-এর metric/imperial conversion অনুযায়ী বদলায় না, তাই chart/table-এ NASA response-এর unit-ই অগ্রাধিকার পায়।
+- `metadata=true` Manager probe-এ T2M ও IMERG-এর `time_start: null`, `time_end: ""`; তাই Manager থেকে per-parameter coverage range দাবি করা যায় না। UI live temporal configuration-এর date window-কে service-wide বলে চিহ্নিত করে এবং প্রতিটি response-এ returned time keys, NASA fill value, valid count ও missing count দেখায়।
+- Solar `ALLSKY_SFC_SW_DWN` 2026-08 probe HTTP 200 হলেও `sources: []` এবং সব sample `-999` ছিল। UI তাই all-fill response-কে লাল quality warning দেখায়; numeric uncertainty/accuracy score বানায় না। NASA accuracy FAQ surface-site comparison-এ পাঠায় এবং methodology source/parameter-specific।
+
+### Time semantics ও citation
+
+- NASA FAQ Time Standards অনুযায়ী LST/UTC toggle শুধু Hourly ও Daily-তে প্রযোজ্য; Monthly/Climatology UTC-তে default হয়। UI সেসব temporal level-এ অপ্রয়োজনীয় LST selector লুকায়। Hourly key/start-of-hour এবং LST-এর 15° longitude-band সংজ্ঞা ব্যাখ্যা করা হয়েছে; LST local civil timezone নয়।
+- NASA Referencing Guide publication-এ POWER Reference ও Data Reference দুটোই, সঙ্গে service name, version ও access date চায়। JSON result থেকে “Copy citation” এই তথ্য, request/response context, response period/source IDs এবং optional `user` identifier বাদ দেওয়া shareable request URL দেয়।
+- Optional `user` query live-probe-এ alphanumeric-only: `qa-smoke-test` HTTP 422-এ “Please supply a an alphanumeric user” বার্তা দিয়েছে; `qaSmokeTest2026` একই request-এ HTTP 200 দিয়েছে। তাই UI field ও request validation-এ letters/numbers-only constraint আছে; এটি account/auth token নয় এবং citation URL থেকে বাদ যায়।
+- Per-response meteorology trend warning শুধু `GEOS-IT` source ID ফিরলে দেখানো হয়; `MERRA2` একা থাকলে near-real-time GEOS-IT উপস্থিত বলে ইঙ্গিত করা হয় না।
+
+### Browser smoke test — ৪ অক্টোবর ২০২৬
+
+- Chromium-এ map control click করে পূর্ণ NASA POWER panel, Daily IMERG fetch, citation copy, monthly request URL এবং 390 × 844 mobile layout পরীক্ষা করা হয়েছে। Console/page error ছিল না; mobile-এ panel পুরো viewport-এর ভেতরে ছিল।
+- ঢাকা point (23.8103°N, 90.4125°E), ২০২৪-০১-০১–০৩ Daily IMERG request HTTP 200, `sources: ["IMERG"]`, response unit `mm/day`, ৩/৩ valid; request-এ UTC ছিল এবং LST control disabled ছিল। Citation-এ service/version/date, request coordinate/date/unit/time context, response source ID ও user-বিহীন URL পাওয়া গেছে।
+- একই সময়সীমার Imperial T2M request-এ `MERRA2` এবং response unit `F` এসেছে; 0.5° × 0.625° source note দেখানো হয়েছে, কিন্তু `MERRA2`-only ফলের জন্য ভুল করে GEOS-IT/NRT warning দেখানো হয়নি।
+- ২০২৬-০৮-০১–০৩ `ALLSKY_SFC_SW_DWN` request HTTP 200 হলেও `sources: []` ও তিনটি `-999` fill sample এসেছে; UI এটিকে ০/৩ valid হিসেবে এবং no-valid-data warning দিয়ে দেখিয়েছে। এটি HTTP status-কে data validity হিসেবে না ধরার end-to-end যাচাই।
+
+সংশ্লিষ্ট NASA official pages: [Data Sources](https://power.larc.nasa.gov/docs/methodology/data/sources/), [Data FAQ](https://power.larc.nasa.gov/docs/faqs/data/), [Time Standards FAQ](https://power.larc.nasa.gov/docs/faqs/other/), [Daily API](https://power.larc.nasa.gov/docs/services/api/temporal/daily/), [Manager API](https://power.larc.nasa.gov/docs/services/api/system/manager/), [Referencing Guide](https://power.larc.nasa.gov/docs/referencing/).
+
 ## Reference sources
 
 - POWER service inventory: https://power.larc.nasa.gov/docs/services/

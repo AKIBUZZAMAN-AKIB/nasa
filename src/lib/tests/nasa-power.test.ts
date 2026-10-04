@@ -5,9 +5,11 @@ import {
 	type PowerTemporalRequest,
 	buildPowerApplicationUrl,
 	buildPowerTemporalUrl,
+	isPowerImergParameter,
 	makePowerWindrosePlotUrl,
 	powerJsonError,
 	powerSeriesFromResponse,
+	powerSourceResolutionNotes,
 	powerSurfaceDetailUrl,
 	validatePowerApplicationRequest,
 	validatePowerCoverageRange,
@@ -26,7 +28,7 @@ const basePointRequest: PowerTemporalRequest = {
 	format: 'JSON',
 	units: 'metric',
 	timeStandard: 'lst',
-	user: '  research-ui  '
+	user: '  researchui  '
 };
 
 describe('NASA POWER temporal requests', () => {
@@ -38,7 +40,19 @@ describe('NASA POWER temporal requests', () => {
 		expect(url.searchParams.get('start')).toBe('20240101');
 		expect(url.searchParams.get('end')).toBe('20240103');
 		expect(url.searchParams.get('format')).toBe('json');
-		expect(url.searchParams.get('user')).toBe('research-ui');
+		expect(url.searchParams.get('user')).toBe('researchui');
+	});
+
+	it('accepts only alphanumeric optional user identifiers', () => {
+		expect(
+			validatePowerTemporalRequest({ ...basePointRequest, user: 'research-ui' }).error
+		).toContain('letters and numbers');
+		expect(
+			validatePowerTemporalRequest({ ...basePointRequest, user: ' researchUI2026 ' }).valid
+		).toBe(true);
+		expect(() => buildPowerTemporalUrl({ ...basePointRequest, user: 'research ui' })).toThrow(
+			'letters and numbers'
+		);
 	});
 
 	it('rejects reversed calendar dates instead of comparing them as numbers', () => {
@@ -191,13 +205,26 @@ describe('NASA POWER application APIs', () => {
 			format: 'JSON',
 			units: 'metric',
 			timeStandard: 'lst',
-			user: 'windrose-test'
+			user: 'windrosetest'
 		});
 		expect(url.pathname).toBe('/api/application/windrose/point');
 		expect(url.searchParams.get('start')).toBe('20100101');
 		expect(url.searchParams.get('end')).toBe('20141231');
 		expect(url.searchParams.get('time-standard')).toBe('lst');
-		expect(url.searchParams.get('user')).toBe('windrose-test');
+		expect(url.searchParams.get('user')).toBe('windrosetest');
+	});
+
+	it('rejects non-alphanumeric identifiers for application requests too', () => {
+		const request = {
+			application: 'windrose' as const,
+			latitude: 23.81,
+			longitude: 90.41,
+			start: '2010-01-01',
+			end: '2014-12-31',
+			user: 'windrose-test'
+		};
+		expect(validatePowerApplicationRequest(request).error).toContain('letters and numbers');
+		expect(() => buildPowerApplicationUrl(request)).toThrow('letters and numbers');
 	});
 
 	it('keeps NASA Windrose plot on its separate HTML path', () => {
@@ -209,12 +236,24 @@ describe('NASA POWER application APIs', () => {
 			'dark',
 			'imperial',
 			'utc',
-			'plot-user'
+			'plotuser'
 		);
 		expect(url.pathname).toBe('/api/application/windrose/plot');
 		expect(url.searchParams.get('format')).toBe('html');
 		expect(url.searchParams.get('theme')).toBe('dark');
-		expect(url.searchParams.get('user')).toBe('plot-user');
+		expect(url.searchParams.get('user')).toBe('plotuser');
+		expect(() =>
+			makePowerWindrosePlotUrl(
+				23.81,
+				90.41,
+				'2010-01-01',
+				'2014-12-31',
+				'light',
+				'metric',
+				'lst',
+				'plot-user'
+			)
+		).toThrow('letters and numbers');
 	});
 
 	it('enforces Zones regional 5-degree bounds and two-year minimum', () => {
@@ -265,6 +304,43 @@ describe('NASA POWER response helpers', () => {
 		});
 		expect(result[0].points.map((point) => point.key)).toEqual(['JAN', 'FEB', 'DEC']);
 		expect(result[0].annualValue).toBe(5);
+		expect(result[0].sampleCount).toBe(3);
+		expect(result[0].validCount).toBe(3);
+		expect(result[0].missingCount).toBe(0);
+	});
+
+	it('counts NASA fill values and preserves their time positions for honest gap charts', () => {
+		const result = powerSeriesFromResponse({
+			properties: {
+				parameter: { T2M: { '20240101': 1, '20240102': -888, '20240103': 3, '202413': 2 } }
+			},
+			parameters: { T2M: { units: 'F' } },
+			header: { fill_value: -888 }
+		});
+		expect(result[0].sampleCount).toBe(3);
+		expect(result[0].validCount).toBe(2);
+		expect(result[0].missingCount).toBe(1);
+		expect(result[0].points.map((point) => point.sampleIndex)).toEqual([0, 2]);
+		expect(result[0].annualValue).toBe(2);
+		expect(result[0].unit).toBe('F');
+	});
+
+	it('identifies IMERG from live parameter definitions and maps known response source grids', () => {
+		expect(isPowerImergParameter('IMERG_PRECTOT')).toBe(true);
+		expect(
+			isPowerImergParameter('CUSTOM_PRECIP', {
+				definition: 'An IMERG-derived precipitation variable'
+			})
+		).toBe(true);
+		expect(isPowerImergParameter('PRECTOTCORR', { definition: 'MERRA-2 precipitation' })).toBe(
+			false
+		);
+		expect(powerSourceResolutionNotes(['IMERG', 'MERRA2', 'GEOSIT', 'SYN1DEG'])).toEqual([
+			'IMERG uses a 0.1° × 0.1° source grid (about 10 km); POWER serves it as daily UTC data.',
+			'MERRA-2 and GEOS-IT use a 0.5° latitude × 0.625° longitude grid.',
+			'SYN1DEG is NASA CERES SYN1deg; NASA identifies its primary solar grid as 1° × 1°.'
+		]);
+		expect(powerSourceResolutionNotes([])).toEqual([]);
 	});
 
 	it('identifies POWER JSON API errors without treating Windrose metadata as an error', () => {
