@@ -1,6 +1,7 @@
 import { get } from 'svelte/store';
 
-import { archiveState } from '$lib/stores/archive';
+import { analysisState, closeAnalysis, openAnalysisAt } from '$lib/stores/analysis';
+import { getArchiveVariable } from '$lib/stores/archive';
 import { activeChart, pickPrimaryVariable } from '$lib/stores/chart';
 import { map } from '$lib/stores/map';
 import { closePowerPanel } from '$lib/stores/power';
@@ -34,30 +35,27 @@ export class HistoryButton {
 		div.title = 'Historical analysis';
 
 		const updateIcon = () => {
-			div.innerHTML = get(archiveState).open ? CHART_ACTIVE_SVG : CHART_SVG;
+			div.innerHTML = get(analysisState).open ? CHART_ACTIVE_SVG : CHART_SVG;
 		};
 
-		this.subscription = archiveState.subscribe(updateIcon);
+		this.subscription = analysisState.subscribe(updateIcon);
 
 		div.addEventListener('contextmenu', (e) => e.preventDefault());
 		div.addEventListener('click', () => {
-			const state = get(archiveState);
+			const state = get(analysisState);
 			if (state.open) {
-				archiveState.update((s) => ({ ...s, open: false }));
+				closeAnalysis();
 				return;
 			}
 			// The two data explorers share the same map corner; show one panel at a time.
 			closePowerPanel();
-			// Seed with the map centre so the panel shows something useful at
-			// once, and carry the on-map variable across as the default.
+			// Seed with the map centre and load immediately, carrying the on-map
+			// variable across as the Open-Meteo default.
 			const centre = get(map)?.getCenter();
-			archiveState.update((s) => ({
-				...s,
-				open: true,
-				latitude: centre?.lat ?? s.latitude ?? 0,
-				longitude: centre?.lng ?? s.longitude ?? 0,
-				variable: pickPrimaryVariable(get(activeChart))
-			}));
+			const variable = pickPrimaryVariable(get(activeChart));
+			openAnalysisAt(centre?.lat ?? state.latitude ?? 0, centre?.lng ?? state.longitude ?? 0, {
+				omVariable: getArchiveVariable(variable) ? variable : state.omVariable
+			});
 		});
 
 		updateIcon();

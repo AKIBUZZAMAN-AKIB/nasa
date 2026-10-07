@@ -605,6 +605,13 @@ const DAILY_AGGREGATES: Record<
 	shortwave_radiation: { name: 'shortwave_radiation_sum', aggregate: 'sum' }
 };
 
+/** Daily aggregate parameter for an Open-Meteo hourly variable, if published. */
+export function dailyAggregateFor(
+	name: string
+): { name: string; aggregate: 'mean' | 'sum' | 'max' | 'min' } | undefined {
+	return DAILY_AGGREGATES[name];
+}
+
 /** True when `variable` can be fetched as an aggregated daily series. */
 export function supportsDailyResolution(variable: ArchiveVariable): boolean {
 	return variable.endpoint === 'archive' && DAILY_AGGREGATES[variable.name] !== undefined;
@@ -753,6 +760,17 @@ function schedule<T>(task: () => Promise<T>): Promise<T> {
 	queue = next.catch(() => undefined);
 	return next;
 }
+
+/**
+ * Shared archive-API queue, exported so other analysis requests (for example
+ * the ERA5 counterpart fetched by the source comparison) respect the same
+ * spacing instead of competing for the per-minute budget.
+ */
+export function scheduleArchiveRequest<T>(task: () => Promise<T>): Promise<T> {
+	return schedule(task);
+}
+
+export const OPEN_METEO_ARCHIVE_BASE = ARCHIVE_BASE;
 
 /** True when the failure is a rate limit rather than a data or query problem. */
 export function isRateLimited(error: unknown): boolean {

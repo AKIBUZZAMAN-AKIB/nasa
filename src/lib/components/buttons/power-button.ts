@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 
-import { archiveState } from '$lib/stores/archive';
+import { closeAnalysis } from '$lib/stores/analysis';
 import { map } from '$lib/stores/map';
 import { powerPanelState } from '$lib/stores/power';
 
@@ -39,7 +39,7 @@ export class PowerButton {
 			}
 
 			const center = get(map)?.getCenter();
-			archiveState.update((current) => ({ ...current, open: false }));
+			closeAnalysis();
 			powerPanelState.set({
 				open: true,
 				latitude: center?.lat ?? state.latitude ?? 0,
