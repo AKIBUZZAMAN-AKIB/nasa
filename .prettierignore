@@ -15,3 +15,6 @@ package-lock.json
 
 # Generated upstream NASA GIBS capabilities snapshot (kept compact)
 src/lib/gibs-catalog.generated.json
+
+# Raw sample downloads
+/.cache

@@ -1,18 +1,24 @@
 {
-	"name": "@openmeteo/maps",
+	"name": "earth-system-trend-explorer",
+	"private": true,
 	"version": "0.0.3",
 	"type": "module",
-	"author": "Open-Meteo <info@open-meteo.com>",
-	"repository": "git://github.com/open-meteo/maps",
-	"description": "UI for using the Open-Meteo maps-protocol using Maplibre GL JS ",
+	"author": "Team DIVERGENT (AKIBUZZAMAN AKIB <akibuzzaman999@gmail.com>)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/AKIBUZZAMAN-AKIB/nasa.git"
+	},
+	"homepage": "https://github.com/AKIBUZZAMAN-AKIB/nasa#readme",
+	"license": "GPL-2.0-only",
+	"description": "Earth System Trend Explorer by DIVERGENT: find what changes in NASA Earth observation data and understand what matters (NASA Space Apps Challenge 2026).",
 	"keywords": [
-		"open-meteo",
-		"meteorological-data",
-		"weather-maps",
-		"om-file"
-	],
-	"files": [
-		"build"
+		"nasa",
+		"space-apps-challenge",
+		"earth-observation",
+		"climate-trends",
+		"mann-kendall",
+		"bangladesh",
+		"sveltekit"
 	],
 	"scripts": {
 		"dev": "vite dev",

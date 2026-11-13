@@ -31,3 +31,7 @@ vite.config.ts.timestamp-*
 /static/images/weather-icons
 # README screenshot, lives at maps/media/example.png in the bucket
 /static/example.png
+
+# Raw downloads behind static/trend-samples (rebuild with scripts/fetch-trend-samples.py)
+/.cache
+__pycache__/
