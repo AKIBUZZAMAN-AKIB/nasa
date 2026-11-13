@@ -357,6 +357,29 @@ export const VARIABLES: Variable[] = [
 			era5Label: 'ECMWF ERA5 solar radiation'
 		}
 	},
+	{
+		id: 'aod',
+		system: 'climate',
+		name: 'Aerosol haze (AOD, 550 nm)',
+		everydayName: 'haze',
+		unit: 'AOD',
+		decimals: 2,
+		agg: 'mean',
+		source: { kind: 'power-monthly', parameter: 'AOD_55' },
+		domain: 'land',
+		dataset: {
+			name: 'NASA POWER AOD_55',
+			provider: 'NASA POWER (solar radiation inputs)',
+			url: POWER_URL,
+			resolution: '0.5° × 0.625°, monthly',
+			firstYear: 2001,
+			live: true
+		},
+		description:
+			'How much sunlight dust, smoke and pollution particles block, at 550 nm. Below 0.1 is a crystal-clear sky; around 1 is very hazy (NASA Earth Observatory). POWER lists it with its solar radiation parameters, from 2001.',
+		up: 'hazier',
+		down: 'clearer'
+	},
 	// --------------------------------------------------------------- Biosphere
 	{
 		id: 'ndvi',

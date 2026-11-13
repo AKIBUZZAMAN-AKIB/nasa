@@ -86,6 +86,12 @@ export const QUICK_STARTS: Preset[] = [
 		selection: { variableId: 'ndvi', regionId: 'bangladesh', seasonId: 'annual' }
 	},
 	{
+		id: 'dhaka-haze',
+		title: 'Winter haze',
+		question: 'Is winter haze over Dhaka getting worse?',
+		selection: { variableId: 'aod', regionId: 'dhaka', seasonId: 'winter' }
+	},
+	{
 		id: 'himalaya-frost',
 		title: 'Himalaya frost',
 		question: 'Are frost days in the Himalaya disappearing?',

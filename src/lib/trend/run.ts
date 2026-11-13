@@ -28,6 +28,7 @@ import {
 	loadReferenceMonthly,
 	loadRegionData
 } from './data';
+import { type DriverModel, explainDrivers } from './insights';
 import { REGIONS, type Region } from './regions';
 import { type Story, buildStory } from './story';
 
@@ -221,6 +222,8 @@ export interface CompareItem {
 export interface Comparison {
 	items: CompareItem[];
 	pairs: PairAssociation[];
+	/** Explainable model of which related variables help predict the year-to-year swings. */
+	drivers: DriverModel | null;
 }
 
 /** Analyse several variables over the same region, season and years, and their associations. */
@@ -258,7 +261,17 @@ export async function compareVariables(
 			.filter((i) => i.series)
 			.map((i) => ({ id: i.variable.id, years: i.series!.years, values: i.series!.values }))
 	);
-	return { items, pairs };
+	const withData = items.filter((i) => i.series);
+	const drivers =
+		withData.length > 1 && withData[0].variable.id === base.variable.id
+			? explainDrivers(
+					{ id: base.variable.id, years: base.series.years, values: base.series.values },
+					withData
+						.slice(1)
+						.map((i) => ({ id: i.variable.id, years: i.series!.years, values: i.series!.values }))
+				)
+			: null;
+	return { items, pairs, drivers };
 }
 
 /** Regions where a variable can be analysed. */
@@ -303,6 +316,7 @@ export function compareSuggestions(variable: Variable, region: Region): Variable
 		'evap',
 		'ts',
 		'npp',
-		'rh2m'
+		'rh2m',
+		'aod'
 	]);
 }

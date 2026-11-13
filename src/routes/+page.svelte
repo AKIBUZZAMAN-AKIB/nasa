@@ -23,11 +23,12 @@
 		EARTH_SYSTEMS,
 		SEASONS,
 		type SystemId,
+		VARIABLES,
 		seasonById,
 		variableById,
 		variablesForSystem
 	} from '$lib/trend/catalog';
-	import { type Region, formatLat, formatLon, regionById } from '$lib/trend/regions';
+	import { REGIONS, type Region, formatLat, formatLon, regionById } from '$lib/trend/regions';
 	import {
 		type Analysis,
 		type Comparison,
@@ -99,9 +100,30 @@
 		return out;
 	});
 
+	const INTRO_KEY = 'trend-intro-dismissed';
+	// Rendered into the static page so it never pushes the page down after load;
+	// app.html hides it before the first paint when it is not needed.
+	let showIntro = $state(true);
+	const namedRegions = REGIONS.filter((r) => r.group !== 'Custom').length;
+	const firstYear = Math.min(...VARIABLES.map((v) => v.dataset.firstYear));
+
+	function dismissIntro() {
+		showIntro = false;
+		try {
+			localStorage.setItem(INTRO_KEY, '1');
+		} catch {
+			// private mode: the tour simply shows again next time
+		}
+	}
+
 	onMount(() => {
 		sel = normalise(parseSelection(new URLSearchParams(location.search)));
 		ready = true;
+		try {
+			showIntro = !location.search && localStorage.getItem(INTRO_KEY) !== '1';
+		} catch {
+			showIntro = false;
+		}
 		if (new URLSearchParams(location.search).get('story') === 'farmer') showFarmer = true;
 	});
 
@@ -220,7 +242,7 @@
 	>
 </svelte:head>
 
-<div class="bg-background text-foreground min-h-dvh">
+<div class="trend-app bg-background text-foreground min-h-dvh">
 	<a
 		href="#controls"
 		class="bg-primary text-primary-foreground sr-only z-50 rounded-md px-3 py-2 focus:not-sr-only focus:absolute focus:top-2 focus:left-2"
@@ -231,7 +253,7 @@
 	<main class="mx-auto max-w-6xl px-3 pb-16 sm:px-5">
 		<!-- Intro -->
 		<section class="pt-5 pb-4 sm:pt-8" aria-labelledby="intro-title">
-			<p class="text-xs font-semibold tracking-wider text-sky-700 uppercase dark:text-sky-300">
+			<p class="text-xs font-semibold tracking-wider text-eyebrow uppercase">
 				NASA Space Apps Challenge 2026 · Team DIVERGENT · Rajshahi, Bangladesh
 			</p>
 			<h1 id="intro-title" class="mt-1 text-2xl font-bold tracking-tight text-balance sm:text-4xl">
@@ -242,6 +264,14 @@
 				observations and answer: what is changing, where, how much, when the major change happened,
 				whether it is statistically significant, and how reliable it is.
 			</p>
+			<ul class="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm" aria-label="What the explorer covers">
+				{#each [{ n: String(EARTH_SYSTEMS.length), l: 'Earth systems' }, { n: String(VARIABLES.length), l: 'variables' }, { n: String(namedRegions), l: 'regions + any point' }, { n: `${firstYear}–${new Date().getFullYear()}`, l: 'years covered' }] as stat (stat.l)}
+					<li class="flex items-baseline gap-1.5">
+						<span class="text-foreground text-lg font-semibold tabular-nums">{stat.n}</span>
+						<span class="text-muted-foreground">{stat.l}</span>
+					</li>
+				{/each}
+			</ul>
 			<div class="mt-4 flex flex-wrap gap-2">
 				<button
 					type="button"
@@ -259,6 +289,34 @@
 					<BookOpen class="size-4" aria-hidden="true" />How it works
 				</a>
 			</div>
+			{#if showIntro}
+				<div
+					class="bg-brand-soft text-brand-ink trend-enter mt-4 rounded-xl border border-transparent p-4"
+					role="region"
+					aria-label="Quick tour"
+					data-intro
+				>
+					<div class="flex items-start justify-between gap-3">
+						<p class="font-semibold">New here? Three steps</p>
+						<button
+							type="button"
+							class="-m-2 min-h-11 shrink-0 rounded-md px-3 text-sm font-semibold underline-offset-4 hover:underline"
+							onclick={dismissIntro}>Got it</button
+						>
+					</div>
+					<ol class="mt-1 grid gap-3 text-sm sm:grid-cols-3">
+						{#each ['Pick an Earth system and a variable, then a place from the list or tap the map.', 'Read the answer: the headline, the six questions and the chart with its trend line.', 'Check “How sure are we?”, then share the link or save a one-page report.'] as step, i (i)}
+							<li class="flex gap-2.5">
+								<span
+									class="bg-primary text-primary-foreground grid size-6 shrink-0 place-items-center rounded-full text-xs font-bold"
+									aria-hidden="true">{i + 1}</span
+								>
+								<span>{step}</span>
+							</li>
+						{/each}
+					</ol>
+				</div>
+			{/if}
 			<div class="mt-4">
 				<p class="text-muted-foreground mb-1.5 text-xs font-medium">Try a question</p>
 				<div class="-mx-3 flex gap-2 overflow-x-auto px-3 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">
@@ -270,7 +328,7 @@
 						<button
 							type="button"
 							class="min-h-11 shrink-0 rounded-full border px-3.5 text-sm transition-colors {active
-								? 'border-sky-600 bg-sky-50 font-semibold text-sky-900 dark:bg-sky-950 dark:text-sky-100'
+								? 'border-brand bg-brand-soft text-brand-ink font-semibold'
 								: 'hover:bg-accent'}"
 							aria-pressed={active}
 							onclick={() => applyPreset(q)}>{q.question}</button
@@ -297,8 +355,8 @@
 					{#each [{ id: 'everyday', label: 'Everyday' }, { id: 'research', label: 'Research' }] as m (m.id)}
 						<button
 							type="button"
-							class="min-h-10 rounded-md text-sm font-semibold transition-colors {sel.mode === m.id
-								? 'bg-background shadow-sm'
+							class="min-h-11 rounded-md text-sm font-semibold transition-colors {sel.mode === m.id
+								? 'bg-card text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/10'
 								: 'text-muted-foreground'}"
 							aria-pressed={sel.mode === m.id}
 							onclick={() => setMode(m.id as Mode)}>{m.label}</button
@@ -322,7 +380,7 @@
 								type="button"
 								class="flex min-h-16 flex-col items-center justify-center gap-1 rounded-lg border px-1 py-2 text-xs font-medium transition-colors {systemId ===
 								s.id
-									? 'border-sky-600 bg-sky-50 text-sky-900 dark:bg-sky-950 dark:text-sky-100'
+									? 'border-brand bg-brand-soft text-brand-ink'
 									: 'hover:bg-accent'}"
 								aria-pressed={systemId === s.id}
 								onclick={() => chooseSystem(s.id)}
@@ -379,7 +437,7 @@
 					</select>
 					<button
 						type="button"
-						class="hover:bg-accent mt-2 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border text-sm font-medium"
+						class="hover:bg-accent mt-2 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border text-sm font-medium"
 						aria-expanded={showMap}
 						onclick={() => (showMap = !showMap)}
 					>
@@ -460,7 +518,7 @@
 					{#if sel.from !== undefined || sel.to !== undefined}
 						<button
 							type="button"
-							class="text-muted-foreground mt-1 min-h-10 text-xs underline underline-offset-2"
+							class="text-muted-foreground mt-1 min-h-11 text-xs underline underline-offset-2"
 							onclick={() => update({ from: undefined, to: undefined }, true)}
 							>Use the full record</button
 						>
@@ -482,14 +540,14 @@
 						<div class="mt-3 flex flex-wrap gap-2">
 							<button
 								type="button"
-								class="hover:bg-accent inline-flex min-h-10 items-center gap-2 rounded-lg border px-3 text-sm font-medium"
+								class="hover:bg-accent inline-flex min-h-11 items-center gap-2 rounded-lg border px-3 text-sm font-medium"
 								onclick={() => retry++}
 							>
 								<RotateCw class="size-4" aria-hidden="true" />Try again
 							</button>
 							<button
 								type="button"
-								class="hover:bg-accent inline-flex min-h-10 items-center rounded-lg border px-3 text-sm font-medium"
+								class="hover:bg-accent inline-flex min-h-11 items-center rounded-lg border px-3 text-sm font-medium"
 								onclick={() => applyPreset(QUICK_STARTS[0])}>Back to the Bangladesh example</button
 							>
 						</div>
@@ -499,7 +557,14 @@
 						{#if status === 'loading'}
 							<p class="text-muted-foreground mb-2 text-sm" role="status">Updating…</p>
 						{/if}
-						<ResultsView {analysis} mode={sel.mode} {comparison} {compareState} {shareUrl} />
+						<ResultsView
+							{analysis}
+							mode={sel.mode}
+							{comparison}
+							{compareState}
+							{shareUrl}
+							{assetBase}
+						/>
 					</div>
 				{:else}
 					<div class="space-y-4" role="status" aria-label="Loading the analysis">

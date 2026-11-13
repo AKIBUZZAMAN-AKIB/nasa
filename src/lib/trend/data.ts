@@ -299,6 +299,33 @@ export function samplePoints(region: Region): [number, number][] {
 	return pts;
 }
 
+const STORE_PREFIX = 'trend-daily:';
+
+function readStoredMonthly(url: string): Monthly | null {
+	try {
+		const raw = globalThis.localStorage?.getItem(STORE_PREFIX + url);
+		return raw ? new Map(JSON.parse(raw) as [number, number][]) : null;
+	} catch {
+		return null;
+	}
+}
+
+function storeMonthly(url: string, monthly: Monthly) {
+	try {
+		const ls = globalThis.localStorage;
+		if (!ls) return;
+		// Drop entries from earlier days (their URLs end on an older date).
+		for (let i = ls.length - 1; i >= 0; i--) {
+			const k = ls.key(i);
+			if (k?.startsWith(STORE_PREFIX) && !k.includes(url.match(/&end=\d+/)?.[0] ?? '#'))
+				ls.removeItem(k);
+		}
+		ls.setItem(STORE_PREFIX + url, JSON.stringify([...monthly]));
+	} catch {
+		// storage full or blocked: the in-memory cache still works
+	}
+}
+
 async function powerDaily(
 	variable: Variable & { source: { kind: 'power-daily' } },
 	region: Region,
@@ -313,13 +340,32 @@ async function powerDaily(
 			`&start=${firstYear}0101&end=${end}&format=JSON&time-standard=utc`
 	);
 	// The sample points are independent requests: fetch them side by side.
-	const bodies = (await Promise.all(
-		urls.map((url) => memo(url, (s) => getJson(url, s), signal))
-	)) as { properties?: { parameter?: Record<string, Record<string, number>> } }[];
+	// Each daily file (~25 years) is reduced to monthly values and kept in
+	// localStorage for the day (the URL holds today's end date), so a reload
+	// or the farmer story reuses it instead of downloading it again.
+	const monthlies = await Promise.all(
+		urls.map((url) => {
+			const stored = readStoredMonthly(url);
+			if (stored) return Promise.resolve(stored);
+			return memo(
+				`m:${url}`,
+				async (s) => {
+					const body = (await getJson(url, s)) as {
+						properties?: { parameter?: Record<string, Record<string, number>> };
+					};
+					const record = body.properties?.parameter?.[parameter];
+					if (!record) return null;
+					const monthly = dailyToMonthly(record, variable.agg);
+					storeMonthly(url, monthly);
+					return monthly;
+				},
+				signal
+			);
+		})
+	);
 	const series: { lat: number; monthly: Monthly }[] = [];
-	bodies.forEach((body, i) => {
-		const record = body.properties?.parameter?.[parameter];
-		if (record) series.push({ lat: points[i][1], monthly: dailyToMonthly(record, variable.agg) });
+	monthlies.forEach((monthly, i) => {
+		if (monthly) series.push({ lat: points[i][1], monthly });
 	});
 	if (!series.length) throw new DataError('NASA POWER returned no daily values.');
 	return {

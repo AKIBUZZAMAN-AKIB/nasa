@@ -1,7 +1,10 @@
 <script lang="ts">
+	import { flushSync, onMount } from 'svelte';
+
 	import Download from '@lucide/svelte/icons/download';
 	import FileSpreadsheet from '@lucide/svelte/icons/file-spreadsheet';
 	import Info from '@lucide/svelte/icons/info';
+	import Printer from '@lucide/svelte/icons/printer';
 	import Share2 from '@lucide/svelte/icons/share-2';
 	import { mode as theme } from 'mode-watcher';
 	import { toast } from 'svelte-sonner';
@@ -22,6 +25,9 @@
 	} from '$lib/trend/story';
 
 	import CellMap from './cell-map.svelte';
+	import DriverModel from './driver-model.svelte';
+	import MonthBreakdown from './month-breakdown.svelte';
+	import RegionCompare from './region-compare.svelte';
 	import TrendChart, { type ChartSeries } from './trend-chart.svelte';
 
 	import type { Analysis, Comparison } from '$lib/trend/run';
@@ -33,12 +39,38 @@
 		comparison?: Comparison | null;
 		compareState: 'idle' | 'loading' | 'done' | 'error';
 		shareUrl: string;
+		assetBase: string;
 	}
 
-	let { analysis: a, mode, comparison = null, compareState, shareUrl }: Props = $props();
+	let { analysis: a, mode, comparison = null, compareState, shareUrl, assetBase }: Props = $props();
+
+	const hasMonthly = $derived(!a.data.annual && a.data.monthly.size >= 24);
+	const printedOn = new Date().toISOString().slice(0, 10);
+
+	function printReport() {
+		window.print();
+	}
 
 	let chartBox: HTMLDivElement | undefined = $state();
 	let showReference = $state(true);
+
+	// The sections below the fold (season by season, compare two places) render one
+	// idle moment after the headline and the chart, so the first answer paints sooner
+	// on a phone. Printing renders them at once.
+	let extrasReady = $state(false);
+	onMount(() => {
+		const show = () => (extrasReady = true);
+		const beforePrint = () => flushSync(show);
+		addEventListener('beforeprint', beforePrint);
+		const idle = typeof requestIdleCallback === 'function';
+		const id = idle ? requestIdleCallback(show, { timeout: 800 }) : 0;
+		const timer = idle ? undefined : setTimeout(show, 50);
+		return () => {
+			removeEventListener('beforeprint', beforePrint);
+			if (idle) cancelIdleCallback(id);
+			clearTimeout(timer);
+		};
+	});
 
 	const research = $derived(mode === 'research');
 	const t = $derived(a.trend);
@@ -214,14 +246,25 @@
 </script>
 
 <section aria-labelledby="result-headline" class="space-y-4">
+	<div data-print-only class="border-b pb-3">
+		<p class="text-lg font-semibold">Earth System Trend Explorer by DIVERGENT: result report</p>
+		<p class="text-sm">Created {printedOn}. Reopen this analysis: {shareUrl}</p>
+	</div>
 	<!-- Story -->
-	<div class="bg-card rounded-xl border p-4 shadow-sm sm:p-5">
-		<p class="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
+	<div
+		class="bg-card trend-enter relative overflow-hidden rounded-xl border p-4 shadow-sm sm:p-5"
+		data-print-block
+	>
+		<div
+			class="from-brand via-eyebrow absolute inset-x-0 top-0 h-1 bg-gradient-to-r to-transparent"
+			aria-hidden="true"
+		></div>
+		<p class="text-eyebrow text-xs font-semibold tracking-wide uppercase">
 			{a.region.name} · {capitalise(seasonPhrase(a.season).trim() || 'whole year')} · {periodLabel}
 		</p>
 		<h2
 			id="result-headline"
-			class="mt-1 text-lg leading-snug font-semibold text-balance sm:text-xl"
+			class="mt-1.5 text-xl leading-snug font-semibold tracking-tight text-balance sm:text-2xl"
 		>
 			{a.story.headline}
 		</h2>
@@ -245,7 +288,7 @@
 			</span>
 			<span
 				class="rounded-full px-2.5 py-1 text-xs font-medium {v.dataset.live
-					? 'bg-sky-100 text-sky-900 dark:bg-sky-900/50 dark:text-sky-100'
+					? 'bg-brand-soft text-brand-ink'
 					: 'bg-violet-100 text-violet-900 dark:bg-violet-900/50 dark:text-violet-100'}"
 			>
 				{v.dataset.live ? 'Live NASA data' : 'Bundled sample data'}
@@ -277,31 +320,8 @@
 						: ''}.
 				</p>
 			</div>
-			<div class="flex gap-1.5">
-				<button
-					type="button"
-					class="hover:bg-accent inline-flex min-h-10 items-center gap-1.5 rounded-md border px-3 text-sm font-medium"
-					onclick={savePng}
-				>
-					<Download class="size-4" aria-hidden="true" />PNG
-				</button>
-				<button
-					type="button"
-					class="hover:bg-accent inline-flex min-h-10 items-center gap-1.5 rounded-md border px-3 text-sm font-medium"
-					onclick={saveCsv}
-				>
-					<FileSpreadsheet class="size-4" aria-hidden="true" />CSV
-				</button>
-				<button
-					type="button"
-					class="hover:bg-accent inline-flex min-h-10 items-center gap-1.5 rounded-md border px-3 text-sm font-medium"
-					onclick={share}
-				>
-					<Share2 class="size-4" aria-hidden="true" />Share
-				</button>
-			</div>
 		</div>
-		<div class="mt-3" bind:this={chartBox}>
+		<div class="mt-3" bind:this={chartBox} data-print-block>
 			<TrendChart
 				years={a.series.years}
 				values={a.series.values}
@@ -315,9 +335,43 @@
 				simple={!research}
 			/>
 		</div>
+		<div class="mt-3 grid grid-cols-2 gap-2 min-[440px]:grid-cols-4" data-no-print>
+			<button
+				type="button"
+				class="hover:bg-accent inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border px-3 text-sm font-medium"
+				onclick={share}
+			>
+				<Share2 class="size-4" aria-hidden="true" />Share
+			</button>
+			<button
+				type="button"
+				class="hover:bg-accent inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border px-3 text-sm font-medium"
+				onclick={savePng}
+			>
+				<Download class="size-4" aria-hidden="true" />PNG
+			</button>
+			<button
+				type="button"
+				class="hover:bg-accent inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border px-3 text-sm font-medium"
+				onclick={saveCsv}
+			>
+				<FileSpreadsheet class="size-4" aria-hidden="true" />CSV
+			</button>
+			<button
+				type="button"
+				class="hover:bg-accent inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border px-3 text-sm font-medium"
+				onclick={printReport}
+			>
+				<Printer class="size-4" aria-hidden="true" />Report
+			</button>
+		</div>
 		{#if research && a.agreementSeries}
-			<label class="mt-2 inline-flex min-h-10 items-center gap-2 text-sm">
-				<input type="checkbox" class="size-4" bind:checked={showReference} />
+			<label class="mt-2 inline-flex min-h-11 items-center gap-2 text-sm">
+				<input
+					type="checkbox"
+					class="accent-primary size-5 shrink-0"
+					bind:checked={showReference}
+				/>
 				Show the second dataset ({a.agreementSeries.label}, dashed)
 			</label>
 		{/if}
@@ -385,6 +439,36 @@
 		</div>
 	{/if}
 
+	{#if hasMonthly && extrasReady}
+		<div class="bg-card rounded-xl border p-4 shadow-sm" data-print-block>
+			<h3 class="font-semibold">Season by season</h3>
+			<div class="mt-3">
+				<MonthBreakdown
+					monthly={a.data.monthly}
+					from={a.from}
+					to={a.to}
+					{unit}
+					decimals={v.decimals}
+					rateDecimals={rd}
+					name={v.everydayName}
+					up={v.up}
+					down={v.down}
+					{research}
+				/>
+			</div>
+		</div>
+	{/if}
+
+	{#if a.region.group !== 'Custom' && extrasReady}
+		<div class="bg-card rounded-xl border p-4 shadow-sm" data-no-print>
+			<h3 class="font-semibold">Compare two places</h3>
+			<p class="text-muted-foreground mb-3 text-sm">
+				Same variable, season and years. Shows whether the gap between the two places is changing.
+			</p>
+			<RegionCompare analysis={a} {assetBase} {research} rateDecimals={rd} />
+		</div>
+	{/if}
+
 	<!-- Cross-variable association -->
 	<div class="bg-card rounded-xl border p-4 shadow-sm">
 		<h3 class="font-semibold">What changes together?</h3>
@@ -441,6 +525,11 @@
 						{/if}
 					{/each}
 				</ul>
+			{/if}
+			{#if comparison.drivers}
+				<div class="mt-4 border-t pt-4">
+					<DriverModel model={comparison.drivers} target={v.everydayName} {research} />
+				</div>
 			{/if}
 			<p
 				class="mt-3 flex gap-1.5 rounded-lg bg-amber-50 p-2.5 text-sm text-amber-950 dark:bg-amber-950/40 dark:text-amber-100"

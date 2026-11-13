@@ -92,24 +92,28 @@ export function buildStory(
 			: '';
 	const cp = trend.changePoint;
 	const regionName = region.name.replace(/ \(.*\)$/, '');
+	// 'Arctic sea-ice extent' already names its place: no 'in Arctic Ocean'.
+	const placeWord = regionName.split(' ')[0].toLowerCase();
+	const namesPlace = variable.name.toLowerCase().split(/\s+/).includes(placeWord);
+	const inRegion = namesPlace ? '' : ` in ${regionName}`;
 
 	// --- Headline
 	let headline: string;
 	if (trend.direction === 'no trend') {
-		headline = `No significant trend in ${what} in ${regionName} (${span})`;
+		headline = `No significant trend in ${what}${inRegion} (${span})`;
 	} else {
-		headline = `${capitalise(what)} in ${regionName} ${trend.direction === 'increasing' ? 'increased' : 'decreased'} significantly (${span})`;
+		headline = `${capitalise(what)}${inRegion} ${trend.direction === 'increasing' ? 'increased' : 'decreased'} significantly (${span})`;
 	}
 
 	// --- Research voice
 	const parts: string[] = [];
 	if (trend.direction === 'no trend') {
 		parts.push(
-			`The ${what} in ${regionName} shows no statistically significant monotonic trend over ${span} (Sen's slope ${rate}, modified Mann–Kendall p = ${formatP(trend.hr.p)}).`
+			`The ${what}${inRegion} shows no statistically significant monotonic trend over ${span} (Sen's slope ${rate}, modified Mann–Kendall p = ${formatP(trend.hr.p)}).`
 		);
 	} else {
 		parts.push(
-			`The ${what} in ${regionName} ${trend.direction === 'increasing' ? 'increased' : 'decreased'} significantly over ${span}: ${rate} (Sen's slope, 95% CI ${signed(trend.perDecadeLow, rd)} to ${signed(trend.perDecadeHigh, rd)}), about ${total}${pct} over the record (modified Mann–Kendall p = ${formatP(trend.hr.p)}).`
+			`The ${what}${inRegion} ${trend.direction === 'increasing' ? 'increased' : 'decreased'} significantly over ${span}: ${rate} (Sen's slope, 95% CI ${signed(trend.perDecadeLow, rd)} to ${signed(trend.perDecadeHigh, rd)}), about ${total}${pct} over the record (modified Mann–Kendall p = ${formatP(trend.hr.p)}).`
 		);
 	}
 	if (cp.kind === 'rate' && cp.year !== undefined) {
@@ -141,11 +145,11 @@ export function buildStory(
 	const thing = variable.everydayName;
 	if (trend.direction === 'no trend') {
 		e.push(
-			`${capitalise(thing)}${seasonWords} in ${regionName} has gone up and down from year to year since ${trend.firstYear}, but there is no clear long-term rise or fall.`
+			`${capitalise(thing)}${seasonWords}${inRegion} has gone up and down from year to year since ${trend.firstYear}, but there is no clear long-term rise or fall.`
 		);
 	} else {
 		e.push(
-			`In ${regionName}, ${thing}${seasonWords} went ${trend.direction === 'increasing' ? 'up' : 'down'} by about ${formatNumber(Math.abs(trend.totalChange), variable.decimals)} ${unit} between ${trend.firstYear} and ${trend.lastYear}${pct}.`
+			`${namesPlace ? capitalise(thing) : `In ${regionName}, ${thing}`}${seasonWords} went ${trend.direction === 'increasing' ? 'up' : 'down'} by about ${formatNumber(Math.abs(trend.totalChange), variable.decimals)} ${unit} between ${trend.firstYear} and ${trend.lastYear}${pct}.`
 		);
 	}
 	if (cp.kind === 'rate' && cp.year !== undefined)

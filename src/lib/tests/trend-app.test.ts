@@ -7,6 +7,7 @@ import {
 	lastCompleteYear,
 	seasonalSeries
 } from '$lib/trend/analyze';
+import { analyzeTrend, assessReliability } from '$lib/trend/analyze';
 import { SEASONS, VARIABLES, seasonById, variableById } from '$lib/trend/catalog';
 import { REGIONS, regionById } from '$lib/trend/regions';
 import { regionsFor } from '$lib/trend/run';
@@ -17,7 +18,7 @@ import {
 	parseSelection,
 	selectionQuery
 } from '$lib/trend/state';
-import { lowerName } from '$lib/trend/story';
+import { buildStory, lowerName } from '$lib/trend/story';
 
 function monthlyFrom(
 	fn: (year: number, month: number) => number | undefined,
@@ -200,5 +201,44 @@ describe('headline names', () => {
 		expect(lowerName('Sea surface temperature (MUR satellite)')).toBe(
 			'sea surface temperature (MUR satellite)'
 		);
+	});
+});
+
+describe('headline place names', () => {
+	const years = Array.from({ length: 30 }, (_, i) => 1990 + i);
+	const series = {
+		years,
+		values: years.map((y, i) => 10 - 0.05 * (y - 1990) + (i % 3) * 0.01),
+		monthsPresent: 30,
+		monthsExpected: 30
+	};
+	const trend = analyzeTrend(series)!;
+	const rel = assessReliability(trend, series, { label: 'none', level: 'Not available' });
+
+	it('does not repeat a place the variable already names', () => {
+		const story = buildStory(
+			variableById('sea_ice')!,
+			regionById('arctic')!,
+			seasonById('m9')!,
+			trend,
+			rel,
+			null
+		);
+		expect(story.headline).not.toMatch(/ in Arctic/);
+		expect(story.headline).toBe(
+			'September average Arctic sea-ice extent decreased significantly (1990–2019)'
+		);
+	});
+
+	it('still names the place for other variables', () => {
+		const story = buildStory(
+			variableById('t2m')!,
+			regionById('rajshahi')!,
+			seasonById('annual')!,
+			trend,
+			rel,
+			null
+		);
+		expect(story.headline).toMatch(/ in Rajshahi/);
 	});
 });
