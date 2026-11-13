@@ -47,6 +47,21 @@
 			ref: 'Bretherton et al. (1999) J. Climate 12:1990; Dawdy & Matalas (1964)'
 		},
 		{
+			name: 'Season by season: a trend for each calendar month',
+			what: "Which months drive the change? Each calendar month is tested on its own (Sen's slope and Hamed–Rao Mann–Kendall, at least 10 years per month). With twelve tests at the 5% level there would be about a 46% chance (if the months were independent) that at least one month looks significant by chance alone, so the twelve p-values are adjusted with Benjamini–Hochberg and a month counts only when q < 0.05. The year × month heatmap shows each month's difference from that month's own average over the chosen years, with the colour scale capped at the 95th percentile so one extreme month cannot wash out the rest.",
+			ref: 'Hamed & Rao (1998) J. Hydrology 204:182–196; Benjamini & Hochberg (1995) JRSS B 57:289'
+		},
+		{
+			name: 'Compare two places: is the gap changing?',
+			what: "Two nearby places share most of their weather, so testing each one separately and comparing the answers is misleading. The app instead builds the yearly difference (place A minus place B) over the years both have, and tests that one series with Sen's slope and Hamed–Rao Mann–Kendall. At least 8 shared years are needed.",
+			ref: 'Sen (1968) JASA 63:1379; Hamed & Rao (1998) J. Hydrology 204:182–196'
+		},
+		{
+			name: 'Machine-learning view: which variables help predict the good and bad years?',
+			what: "A ridge regression (fixed penalty λ = 1 on standardised inputs, so there is nothing to tune and overfit) predicts the yearly value from the related variables for the same region, season and years. Every series is detrended first, with the line fitted on the training years only, so two things that both rise over time earn no credit. Skill is measured by leave-one-year-out cross-validation: the model never sees the year it predicts, and R² is measured against a trend-only forecast. A variable's importance is how much that out-of-sample R² drops when it is left out. The JavaScript matches a NumPy reference implementation in the unit tests.",
+			ref: 'Hoerl & Kennard (1970) Technometrics 12:55–67; Stone (1974) JRSS B 36:111–147; Lei et al. (2018) JASA 113:1094–1111 (leave-one-covariate-out importance)'
+		},
+		{
 			name: 'Dataset agreement and homogeneity check',
 			what: 'Each result is compared with an independent dataset: year-to-year correlation, and whether the second trend has the same sign and significance. The difference between the two standardised series is also tested with Pettitt; a sharp jump there points to a change in how one dataset was made (an inhomogeneity), and the confidence drops to Low.',
 			ref: 'Peterson et al. (1998) Int. J. Climatol. 18:1493 (homogeneity of climate series)'
@@ -60,7 +75,7 @@
 	<title>Methods and data · Earth System Trend Explorer by DIVERGENT</title>
 </svelte:head>
 
-<div class="bg-background text-foreground min-h-dvh">
+<div class="trend-app bg-background text-foreground min-h-dvh">
 	<SiteHeader current="about" />
 	<main class="mx-auto max-w-3xl px-4 pt-6 pb-16 sm:px-6">
 		<h1 class="text-2xl font-bold tracking-tight sm:text-3xl">How the Trend Explorer works</h1>
@@ -98,7 +113,7 @@
 		<h2 class="mt-8 text-xl font-semibold">Statistical methods</h2>
 		<p class="text-muted-foreground mt-1 text-sm">
 			All run in your browser (TypeScript, no server). Unit tests check them against the Python
-			reference packages pymannkendall and SciPy.
+			reference packages pymannkendall, SciPy and NumPy.
 		</p>
 		<dl class="mt-3 space-y-4">
 			{#each methods as m (m.name)}
@@ -179,6 +194,29 @@
 			NOAA CPC soil moisture and NCEP reanalyses (NOAA PSL), and ECMWF ERA5 for tapped points (via
 			Open-Meteo). Imagery: NASA GIBS (MODIS, SMAP).
 		</p>
+		<h3 class="mt-5 font-semibold">Dataset references</h3>
+		<ul class="mt-2 list-disc space-y-1.5 pl-5 text-sm">
+			<li>
+				NASA GISTEMP v4: Lenssen et al. (2019) J. Geophys. Res. Atmos. 124:6307–6326,
+				doi:10.1029/2018JD029522.
+			</li>
+			<li>
+				MERRA-2 (the source of most NASA POWER variables here): Gelaro et al. (2017) J. Climate
+				30:5419–5454, doi:10.1175/JCLI-D-16-0758.1.
+			</li>
+			<li>
+				NASA POWER, including aerosol optical depth at 550 nm (AOD_55): NASA Langley Research Center
+				POWER Project, power.larc.nasa.gov.
+			</li>
+			<li>
+				NSIDC Sea Ice Index v4: Fetterer et al. (2025) G02135, National Snow and Ice Data Center,
+				doi:10.7265/a98x-0f50.
+			</li>
+			<li>
+				MUR SST v4.1: Chin, Vazquez-Cuervo & Armstrong (2017) Remote Sens. Environ. 200:154–169; JPL
+				MUR MEaSUREs Project, doi:10.5067/GHGMR-4FJ04.
+			</li>
+		</ul>
 		<p class="text-muted-foreground mt-2 text-sm">
 			SMAP soil moisture and GRACE groundwater need a NASA Earthdata login for their data files, so
 			soil moisture comes from MERRA-2 and SMAP is shown as a GIBS map layer.
@@ -208,8 +246,16 @@
 				a few sites, not every pixel.
 			</li>
 			<li>
-				<strong>Machine learning</strong> could rank which variables best explain a change; this version
-				keeps to transparent statistics so every number can be checked.
+				<strong>The machine-learning view predicts, it does not explain causes.</strong> All its inputs
+				are measured over the same months, so a variable can predict well because it responds to the target
+				(soil is wet after a rainy season) rather than drives it. With only a few decades of yearly values
+				the model is deliberately small and linear; strongly related inputs (such as surface and root-zone
+				soil moisture) share their importance, so one can look unimportant when the other already carries
+				the same information.
+			</li>
+			<li>
+				<strong>Season by season</strong> results rest on one value per year for each month, so a single
+				month needs a long record before its trend survives the false discovery rate correction.
 			</li>
 		</ul>
 
@@ -227,7 +273,7 @@
 		<p class="mt-6">
 			<a
 				href={`${base}/`}
-				class="inline-flex min-h-11 items-center rounded-lg bg-sky-700 px-4 text-sm font-semibold text-white hover:bg-sky-800"
+				class="inline-flex min-h-11 items-center bg-primary text-primary-foreground rounded-lg px-4 text-sm font-semibold hover:opacity-90"
 				>Open the explorer</a
 			>
 		</p>
