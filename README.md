@@ -1,120 +1,134 @@
-# Open-Meteo Maps
+# Earth System Trend Explorer
 
-[![codecov](https://codecov.io/gh/open-meteo/maps/graph/badge.svg?token=QRHSC0EGJ8)](https://codecov.io/gh/open-meteo/maps)
-[![Tests & Build](https://github.com/open-meteo/maps/actions/workflows/build.yml/badge.svg)](https://github.com/open-meteo/maps/actions/workflows/build.yml)
-[![GitHub license](https://img.shields.io/github/license/open-meteo/maps)](https://github.com/open-meteo/maps/blob/main/LICENSE)
+**by Team DIVERGENT · NASA Space Apps Challenge 2026 · Rajshahi, Bangladesh**
 
-A UI demo for the [Open-Meteo Weather Map Layer](https://github.com/open-meteo/weather-map-layer) — a MapLibre/Mapbox GL JS weather layer powered by Open-Meteo OMfiles.
+> Find what changes. Understand what matters.
 
-![Open-Meteo Maps UI example](https://static-assets.open-meteo.com/maps/media/example.png)
+An evidence-based web app that turns NASA Earth observation records into clear, honest answers about how Earth is changing, for researchers and for farmers, students and citizens alike. It runs fully in the browser: no server, no login, no install.
 
-## About
+![The explorer on a phone and on a desktop](docs/screenshots/hero.png)
 
-This is a client-side app that fetches OMfiles from `data-spatial.open-meteo.com` and renders them with MapLibre GL. Weather tiles are fully rendered in the browser at the native model resolution — no server-side tile rendering required.
+## The problem
 
-> Looking for the Open-Meteo API? See [open-meteo/open-meteo](https://github.com/open-meteo/open-meteo).
+NASA publishes decades of satellite and reanalysis data on temperature, rainfall, soil moisture, vegetation, snow, sea ice and the ocean. But a farmer in Rajshahi, a student or a local official cannot easily answer a simple question with it: _is monsoon rainfall here actually decreasing?_ Raw data portals need expertise and tooling. Simple charts mislead, because climate series are noisy and autocorrelated and datasets disagree. And most tools never say how sure they are.
 
-## Development
+## Our solution
+
+Pick an **Earth system**, a **variable**, a **region** (from a list or by tapping the map) and a **time period**. The app loads the data, runs a transparent statistical pipeline and answers six questions:
+
+1. **What** is changing?
+2. **Where** is it changing? (a grid-cell map of change)
+3. **How much?** (Sen's slope per decade, with a 95% interval)
+4. **When** did the major change occur? (change point: a jump in level or a change in speed)
+5. **Is it significant?** (autocorrelation-corrected Mann–Kendall)
+6. **How reliable is it?** (data coverage, record length and agreement with an independent dataset)
+
+Every result is told twice: in **Research** language with every statistic, and in **Everyday** plain English.
+
+## Features
+
+- **5 Earth systems, 20 variables:** Climate, Biosphere, Land Surface, Cryosphere and Ocean.
+- **Regions:** all of Bangladesh, its eight divisions, the Sundarbans, the Eastern and Central Himalaya, the Northern and Central Bay of Bengal and the Arctic Ocean, or any point you tap on the map.
+- **Seasons:** whole year, pre-monsoon (Mar–May), monsoon (Jun–Sep), post-monsoon (Oct–Nov), winter (Dec–Feb) or any single month; any year range.
+- **"How sure are we?" panel:** significance, coverage, dataset agreement and an overall confidence that is never High for a trend that is not significant or that a second dataset contradicts.
+- **Second-source check with break detection:** land results are compared with independent NOAA datasets (ERA5 for tapped points). A sudden jump in the gap between the two flags a likely inhomogeneity and lowers confidence.
+- **Cross-variable view:** which variables change together, always reported as association, never cause.
+- **A farmer's story:** three questions a farmer near Rajshahi asks (monsoon rain, dry-season soil moisture, vegetation), answered from three NASA datasets.
+- **Quick-start questions:** "Is Bangladesh getting hotter?", "Is the sea next to us warming?", "How fast is Arctic sea ice shrinking in September?" and more.
+- **Share and export:** every analysis is a shareable link; download the chart as PNG or the numbers as CSV.
+- **Mobile first:** touch charts and maps, tested at 360, 390, 768 and 1366 px; dark mode; keyboard skip link.
+- **Methods page** with every test, its reference and the app's limits.
+- **Live weather map** (the original Open-Meteo map, with NASA GIBS imagery and NASA POWER panels) on its own page.
+
+## Methods
+
+All statistics run in the browser in TypeScript (`src/lib/trend/stats.ts`). Unit tests check them against the Python reference packages pymannkendall and SciPy (`src/lib/tests/trend-stats.test.ts`).
+
+| Question                                     | Method                                                                       | Reference                                                                    |
+| -------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Is there a trend?                            | Mann–Kendall, tie-corrected                                                  | Mann (1945) _Econometrica_ 13:245; Kendall (1975) _Rank Correlation Methods_ |
+| ...even with autocorrelation? (primary test) | Hamed–Rao modified Mann–Kendall                                              | Hamed & Rao (1998) _J. Hydrology_ 204:182–196                                |
+| Second autocorrelation check                 | Trend-free pre-whitening                                                     | Yue, Pilon, Phinney & Cavadias (2002) _Hydrol. Processes_ 16:1807            |
+| How much per decade?                         | Sen's slope with a 95% interval                                              | Sen (1968) _JASA_ 63:1379; Gilbert (1987)                                    |
+| When did the level shift?                    | Pettitt change-point test                                                    | Pettitt (1979) _Applied Statistics_ 28:126–135                               |
+| Did the change speed up or slow down?        | Two-phase regression compared by BIC (ΔBIC > 6)                              | Schwarz (1978) _Ann. Statist._ 6:461; Kass & Raftery (1995) _JASA_ 90:773    |
+| Where is the change real?                    | Per-cell tests with Benjamini–Hochberg FDR                                   | Benjamini & Hochberg (1995) _JRSS B_ 57:289; Wilks (2016) _BAMS_ 97:2263     |
+| Do variables change together?                | Detrended Pearson with effective sample size, plus Spearman                  | Bretherton et al. (1999) _J. Climate_ 12:1990                                |
+| Is the dataset trustworthy?                  | Agreement with an independent dataset and a Pettitt test on their difference | Peterson et al. (1998) _Int. J. Climatol._ 18:1493                           |
+
+**Pipeline:** load monthly values → aggregate to one value per year for the chosen season (a mean needs at least three quarters of its months, a total needs all of them; a missing month is filled with its long-term average plus the season's anomaly so it cannot bias the mean; an unfinished year is left out) → test → judge reliability → explain.
+
+## NASA data
+
+| System       | Variable                                                           | Dataset                                                                  | Resolution                     | Access |
+| ------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------ | ------------------------------ | ------ |
+| Climate      | Surface temperature anomaly                                        | [NASA GISTEMP v4](https://data.giss.nasa.gov/gistemp/)                   | 2°, monthly, vs 1951–1980      | Sample |
+| Climate      | Air temperature, daily maximum, relative humidity, rainfall        | [MERRA-2 via NASA POWER](https://power.larc.nasa.gov/)                   | 0.5° × 0.625°, monthly         | Live   |
+| Climate      | Rainfall (satellite)                                               | [GPM IMERG Final via NASA POWER](https://gpm.nasa.gov/data/imerg)        | 0.1°, daily                    | Live   |
+| Climate      | Surface solar radiation                                            | [CERES SYN1deg / GEWEX SRB via NASA POWER](https://power.larc.nasa.gov/) | 1°, monthly                    | Live   |
+| Biosphere    | Vegetation greenness (NDVI)                                        | [MODIS Terra MOD13Q1 v6.1](https://modis.ornl.gov/sites/)                | 250 m, 16-day, division sites  | Sample |
+| Biosphere    | Plant productivity (NPP)                                           | [MODIS Terra MOD17A3HGF v6.1](https://modis.ornl.gov/sites/)             | 500 m, yearly, division sites  | Sample |
+| Land Surface | Surface and root-zone soil moisture, skin temperature, evaporation | [MERRA-2 via NASA POWER](https://power.larc.nasa.gov/)                   | 0.5° × 0.625°, monthly         | Live   |
+| Cryosphere   | Snow cover, snow depth, frost days                                 | [MERRA-2 via NASA POWER](https://power.larc.nasa.gov/)                   | 0.5° × 0.625°, monthly         | Live   |
+| Cryosphere   | Arctic sea-ice extent                                              | [NSIDC Sea Ice Index v4 (G02135)](https://nsidc.org/data/g02135)         | 25 km, monthly                 | Sample |
+| Ocean        | Sea surface temperature                                            | [MERRA-2 via NASA POWER](https://power.larc.nasa.gov/)                   | 0.5° × 0.625°, monthly         | Live   |
+| Ocean        | Sea surface temperature (satellite)                                | [NASA JPL MUR SST v4.1](https://podaac.jpl.nasa.gov/MEaSUREs-MUR)        | 0.01°, monthly, two Bay points | Sample |
+| Ocean        | Chlorophyll-a                                                      | [NASA MODIS-Aqua ocean colour](https://oceancolor.gsfc.nasa.gov/)        | 4 km, monthly, two Bay points  | Sample |
+
+**Live** datasets are read from NASA servers in your browser. **Sample** datasets come from servers a web page cannot read (no cross-site access, or too slow), so they were downloaded once with `scripts/fetch-trend-samples.py` and `scripts/fetch-reference.py` and are bundled in `static/trend-samples/`, clearly labelled in the app.
+
+**Independent comparison datasets:** NOAA PSL (GHCN_CAMS station temperature, GPCP v2.3 precipitation, CPC soil moisture, NCEP reanalyses) and ECMWF ERA5 via Open-Meteo for tapped points. **Imagery:** NASA GIBS. Built with the Space Apps Bangladesh NASA Data Resource Hub.
+
+## Screenshots
+
+| Phone (390 px)                                          | Farmer story                                       | Dark mode                               |
+| ------------------------------------------------------- | -------------------------------------------------- | --------------------------------------- |
+| ![Result on a phone](docs/screenshots/phone-result.png) | ![Farmer story](docs/screenshots/farmer-story.png) | ![Dark mode](docs/screenshots/dark.png) |
+
+![Research view on a desktop](docs/screenshots/desktop-research.png)
+
+## Run it locally
 
 Requires Node LTS (see `.nvmrc`).
 
 ```bash
 npm install
-npm run dev
+npm run dev            # http://localhost:5173
 ```
 
-Build for production:
+Checks and tests:
 
 ```bash
-npm run build
-npm run preview
+npm run lint           # Prettier and ESLint
+npm run check          # svelte-check (TypeScript)
+npx vitest run         # unit tests
 ```
 
-Generate the self-contained application HTML (written one directory above this repository by default):
+Production build for a sub-path (as on GitHub Pages):
 
 ```bash
-npm run build:onefile
+BASE_PATH=/nasa npm run build
+BASE_PATH=/nasa npm run preview   # http://localhost:4173/nasa/
 ```
 
-Run checks:
+**Deploying:** `.github/workflows/pages.yml` builds and deploys to GitHub Pages, but only when run by hand (Actions → Deploy to GitHub Pages → Run workflow), after Pages is enabled with the "GitHub Actions" source in the repository settings.
 
-```bash
-npm test          # vitest unit tests
-npm run check     # svelte-check
-npm run lint      # prettier + eslint
-```
+**Refreshing the bundled samples:** `python3 scripts/fetch-trend-samples.py` and `python3 scripts/fetch-reference.py` (raw downloads are cached in the git-ignored `.cache/`).
 
-### Data endpoint
+## Limitations
 
-The app fetches OMfiles from `data-spatial.open-meteo.com` by default. Set `VITE_DATA_BASE_URI` (e.g. in `.env.local`) to point a build at a local or staging `data_spatial` endpoint.
+- **Association is not causation.** The cross-variable view shows what changes together, never why.
+- **Reanalysis and satellite uncertainty.** MERRA-2 and ERA5 are models constrained by observations, and satellite records change sensors over time. The agreement and break checks catch some of this, not all. For example, MERRA-2 air temperature over Rajshahi disagrees with NOAA station data and shows a break around 1999, so the app rates it Low confidence; NASA GISTEMP is the default for temperature for that reason.
+- **Short records** (under about 20 years) stay uncertain even with autocorrelation corrections.
+- **Change points are statistical:** the year the data shift most, not proof of an event in that year.
+- **Resolution:** 0.5° grids (about 55 km) blur local detail; sample datasets cover a few sites, not every pixel.
+- **Live data depends on NASA POWER** being reachable; results are cached in the browser for a day.
+- **Not used:** SMAP soil moisture and GRACE groundwater files need a NASA Earthdata login, so soil moisture comes from MERRA-2 and SMAP appears only as a GIBS image layer.
 
-The `data_spatial` tree is served from two places:
+## Team DIVERGENT
 
-- `https://openmeteo.s3.amazonaws.com/data_spatial/...` is the AWS S3 origin. Public and uncached, with a browsable index at [openmeteo.s3.amazonaws.com](https://openmeteo.s3.amazonaws.com/index.html#data_spatial/). This is the endpoint used by the [weather-map-layer](https://github.com/open-meteo/weather-map-layer) README and examples.
-- `https://data-spatial.open-meteo.com/data_spatial/...` is the endpoint this app uses. It only accepts requests with a `localhost` or `*.open-meteo.com` referer. The app automatically retries through S3 after an HTTP 403, because a standalone page may be hosted on an unrelated origin.
+Built in Rajshahi, Bangladesh for the NASA Space Apps Challenge 2026 (challenge: Earth System Trend Detective). Lead: AKIBUZZAMAN AKIB.
 
-### Basemap
+## Credits and licence
 
-The map uses the first of these providers that loads; the others are automatic fallbacks:
-
-1. **[Maptoolkit](https://www.maptoolkit.org) community vector tiles.** Free, no API key or sign-up. The app uses the English-labelled light and dark styles (`light-en` / `dark-en` on `styles.maptoolkit.org`); `VITE_MAPTOOLKIT_LANGUAGE=local` switches to Maptoolkit's own local-language labels.
-2. **The Open-Meteo basemap style**, drawn from OpenFreeMap's tiles (the basemap this app used before Maptoolkit was added).
-3. **OpenFreeMap's Positron / Dark style.**
-
-**Failover.** Before Maptoolkit is used, the app fetches its style and TileJSON (6 s timeout) and checks them: a valid version 8 style, tiles served by Maptoolkit, every source layer the style reads, the copyright text, and a layer order the weather layers can be inserted into. If any check fails, the next provider is used. If Maptoolkit answers but then stops serving tiles (5 tile requests in a row fail and none succeeds for 4 s: an outage or a rate limit), the style is reloaded with the next provider. Missing tiles (404, which MapLibre treats as empty) and services that only fail now and then do not trigger it. A provider that failed is skipped for 10 minutes; a page reload tries all of them again. A toast tells the user when a fallback is in use. The code is in `src/lib/basemap.ts` (pure helpers, unit tested) and `src/lib/map-controls.ts`.
-
-**Weather layer order.** Weather rasters go directly under the first administrative border of the Maptoolkit style, above every water, land and relief fill. (The "first line layer" rule of the other providers would put them under Maptoolkit's opaque water.) Contours and arrows go under the first label layer, and Clip Water adds copies of Maptoolkit's own water fills on top of them. Otherwise the style is used unchanged.
-
-**Attribution.** Maptoolkit's terms (section 8) require its logo and the copyright line "© Maptoolkit © Openstreetmap" to be visible at every size and zoom, never collapsed, hidden or covered. With Maptoolkit active the map therefore shows the logo ([`@maptoolkit/maplibre-logo-control`](https://www.npmjs.com/package/@maptoolkit/maplibre-logo-control), 28 px high where the terms ask for at least 24, on a dark chip so it stays readable on pale maps) above a copyright line that is created with `compact: false`. `src/lib/attribution.ts` measures the time selector, the satellite panel and the replay bar and raises the credits above whichever is in the way; the historical panel and toasts stay clear of them too. The other providers keep MapLibre's normal collapsible attribution. Read section 8 again before changing any of this.
-
-**Terms of use.** Maptoolkit's [terms of service](https://www.maptoolkit.org/tos) (Community License, version of 1 July 2026) allow its free tiles only for professional, non-commercial or academic use, open-source projects, and small commercial use (under EUR 1M revenue and fewer than 10 employees). They exclude consumer apps, bulk or offline use, screenshots in static documents, and using Maptoolkit styles with other tile providers. They also exclude use behind a login (intranets, paywalls) and any navigation, emergency or other safety-critical decision (section 14). Fair use is about 10 uncached requests per second sustained (50 in a burst) without registration; that is the figure in the binding terms, other Maptoolkit pages quote higher ones. There is no SLA, and endpoints can be discontinued with 90 days' notice. Browsers must call the Maptoolkit hosts directly (no proxy of your own); if you add a Content-Security-Policy, allow `styles`, `tiles`, `fonts` and `icons` on `maptoolkit.org` plus `tiles.mapterhorn.com`. Check that your project qualifies, and the current wording, before deploying.
-
-| Variable                   | Default                             | Meaning                                                                                                                                                                                                                                                                                                            |
-| -------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `VITE_BASEMAP_PROVIDERS`   | `maptoolkit,open-meteo,openfreemap` | Order in which providers are tried. A shorter list switches the others off: `open-meteo,openfreemap` turns Maptoolkit off.                                                                                                                                                                                         |
-| `VITE_MAPTOOLKIT_LANGUAGE` | `en`                                | Label language of the Maptoolkit basemap: `ar cs de en es fr hi hu it ja ko pl zh`, or `local` for Maptoolkit's own default (local names plus a Latin subtitle, so Bengali and English in Bangladesh). There is no Bengali-only variant, and MapLibre 6.11 draws Bengali letters unevenly, so `en` is the default. |
-
-#### Open-Meteo style and browser CORS (providers 2 and 3)
-
-The Open-Meteo basemap style is retained, but its `tiles.open-meteo.com` vector TileJSON/MVT endpoint does not currently return `Access-Control-Allow-Origin` to browser clients. The app therefore loads the CORS-enabled public OpenFreeMap vector TileJSON and inlines its tile template into the style after verifying the required OpenMapTiles source layers. This avoids a public CORS proxy and preserves the style's attribution, including OpenFreeMap, OpenMapTiles, and OpenStreetMap. If the Open-Meteo style host is unavailable, the app falls back to OpenFreeMap's Positron/Dark style. OpenFreeMap's [Quick Start Guide](https://openfreemap.org/quick_start/) documents direct MapLibre style integration; its [service and attribution notes](https://openfreemap.org/) state that the public instance requires attribution and no API key. The public service is third-party infrastructure and is provided as-is; keep its attribution visible.
-
-### Historical analysis data
-
-The historical panel deliberately separates long, climate-consistent reanalysis from shorter operational forecast archives:
-
-- ERA5 (1940+), ERA5-Land (1950+), ERA5-Ensemble (1940+), and CERRA use the [Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api).
-- NOAA GFS, DWD ICON, and CMA GFS GRAPES use the separate [Historical Forecast API](https://open-meteo.com/en/docs/historical-forecast-api): documented coverage starts 2021-03-23, 2022-11-24, and 2023-12-31 respectively. The first calendar year is partial; requests start on the documented date, and the panel labels these as archived forecasts rather than reanalysis.
-- CERRA is Europe-only and its live archive currently ends 2021-06-30. The year-based analysis control therefore stops at 2020, the last complete calendar year.
-- The 1991–2020 anomaly view is offered only when the selected source covers that whole baseline. For multi-decadal climate trends, keep the same reanalysis throughout rather than mixing forecast-model archives.
-
-Open-Meteo documents key-free, non-commercial access subject to its published terms and usage limits. This app calls the official APIs directly; it does not use a public CORS proxy. See the [pricing and terms](https://open-meteo.com/en/pricing) before deployment, especially for commercial use.
-
-### Cross-origin isolation
-
-The weather-map-layer renders through `SharedArrayBuffer`, which needs cross-origin isolation. The dev and preview servers send the required `COOP`/`COEP` headers via a plugin in `vite.config.ts`; in production the same headers come from `static/_headers` (Cloudflare Pages). If these headers are ever dropped, the app still works but falls back to a slower path that copies data to every worker.
-
-To serve the generated standalone HTML with those headers and gzip compression, run:
-
-```bash
-npm run serve:onefile -- ../open-meteo-maps-onefile.html
-```
-
-Then open `http://localhost:8000/`. Pass a different HTML path and optional port after `--` if needed.
-
-The standalone HTML also opens straight from disk (double-click, `file://`) in Chrome and Edge: there the workers are passed as `data:` URLs instead of `blob:` URLs, because a worker on a file page cannot load a nested `blob:` worker (see the comment in `scripts/build-onefile.mjs`). From disk there is no cross-origin isolation, so the app uses the slower path that copies data to every worker, and the first request to `data-spatial.open-meteo.com` is refused (HTTP 403) and retried through the S3 mirror. Use `npm run serve:onefile` or any HTTPS host with the headers above for the full-speed path.
-
-### Working on the weather-map-layer locally
-
-`package.json` pins `@openmeteo/weather-map-layer` to a git commit. To develop against a local checkout, link it:
-
-```bash
-cd ../weather-map-layer && npm link && npm run build
-cd ../maps && npm link @openmeteo/weather-map-layer
-```
-
-The package resolves through its `dist/` build, so rebuild the weather-map-layer after changes to see them in the app.
-
-## Issues & Contributing
-
-- Open issues and PRs in this repository for UI/demo-related changes.
-- For issues with the weather map layer itself, see the [weather-map-layer issues](https://github.com/open-meteo/weather-map-layer/issues).
+The live weather map and the project scaffold come from [Open-Meteo Maps](https://github.com/open-meteo/maps). Licensed under the GNU GPL v2 (see [LICENSE](LICENSE)). NASA data are courtesy of NASA GISS, GMAO, LaRC POWER, GPM, LP DAAC / ORNL DAAC, JPL PO.DAAC, OBPG and NSIDC; comparison data courtesy of NOAA PSL and ECMWF (via Open-Meteo).
