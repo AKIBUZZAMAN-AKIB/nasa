@@ -1,211 +1,540 @@
 <script lang="ts">
-	import { onDestroy, onMount, tick } from 'svelte';
+	import { onMount } from 'svelte';
 
-	import { variableOptions } from '@openmeteo/weather-map-layer';
+	import BookOpen from '@lucide/svelte/icons/book-open';
+	import CloudSun from '@lucide/svelte/icons/cloud-sun';
+	import Leaf from '@lucide/svelte/icons/leaf';
+	import MapIcon from '@lucide/svelte/icons/map';
+	import Mountain from '@lucide/svelte/icons/mountain-snow';
+	import RotateCw from '@lucide/svelte/icons/rotate-cw';
+	import Sprout from '@lucide/svelte/icons/sprout';
+	import Waves from '@lucide/svelte/icons/waves';
 	import 'maplibre-gl/dist/maplibre-gl.css';
-	import { mode, userPrefersMode } from 'mode-watcher';
-	import { toast } from 'svelte-sonner';
 
-	import { activeChart } from '$lib/stores/chart';
-	import { gibsBrowse, initGibsState } from '$lib/stores/gibs';
-	import { map } from '$lib/stores/map';
-	import { initStoredState, loading, url } from '$lib/stores/preferences';
-	import { initReplayState } from '$lib/stores/replay';
-	import { installRequestCounter } from '$lib/stores/request-counter';
-	import { modelRun } from '$lib/stores/time';
-	import { domain, selectedDomain } from '$lib/stores/variables';
+	import { replaceState } from '$app/navigation';
+	import { base } from '$app/paths';
+
+	import FarmerStory from '$lib/components/trend/farmer-story.svelte';
+	import RegionMap from '$lib/components/trend/region-map.svelte';
+	import ResultsView from '$lib/components/trend/results-view.svelte';
+	import SiteHeader from '$lib/components/trend/site-header.svelte';
 
 	import {
-		ClippingButton,
-		DarkModeButton,
-		HelpButton,
-		HillshadeButton,
-		SettingsButton
-	} from '$lib/components/buttons';
-	import { HistoryButton } from '$lib/components/buttons/history-button';
-	import { PowerButton } from '$lib/components/buttons/power-button';
-	import ClippingPanel from '$lib/components/clipping/clipping-panel.svelte';
-	import Dropzone from '$lib/components/dropzone/dropzone.svelte';
-	import HelpDialog from '$lib/components/help/help-dialog.svelte';
-	import HistoricalPanel from '$lib/components/history/historical-panel.svelte';
-	import KeyboardHandler from '$lib/components/keyboard/keyboard-handler.svelte';
-	import Spinner from '$lib/components/loading/spinner.svelte';
-	import PowerPanel from '$lib/components/power/power-panel.svelte';
-	import Scale from '$lib/components/scale/scale.svelte';
-	import SelectionPanel from '$lib/components/selection/selection-panel.svelte';
-	import Settings from '$lib/components/settings/settings.svelte';
-	import TimeSelector from '$lib/components/time/time-selector.svelte';
+		EARTH_SYSTEMS,
+		SEASONS,
+		type SystemId,
+		seasonById,
+		variableById,
+		variablesForSystem
+	} from '$lib/trend/catalog';
+	import { type Region, formatLat, formatLon, regionById } from '$lib/trend/regions';
+	import {
+		type Analysis,
+		type Comparison,
+		compareSuggestions,
+		compareVariables,
+		regionsFor,
+		runAnalysis
+	} from '$lib/trend/run';
+	import {
+		DEFAULT_SELECTION,
+		type Mode,
+		type Preset,
+		QUICK_STARTS,
+		type Selection,
+		parseSelection,
+		selectionQuery
+	} from '$lib/trend/state';
 
-	import { unwatchAttributionOverlap, watchAttributionOverlap } from '$lib/attribution';
-	import { getChartPreset } from '$lib/chart-presets';
-	import { postEmbedderReady, startEmbedderBridge, stopEmbedderBridge } from '$lib/embed';
-	import { destroyGibsLayers, initGibsLayers } from '$lib/gibs-layers';
-	import { addOmFileLayers, changeOMfileURL, setWeatherLayersSuppressed } from '$lib/layers';
-	import { createMap, getAppliedStyleMode, reloadStyles } from '$lib/map-controls';
-	import { loadDomainMetaData } from '$lib/metadata';
-	import { addPopup } from '$lib/popup';
-	import { syncChartToUrl, updateUrl, urlParamsToPreferences } from '$lib/url';
+	const SYSTEM_ICONS = {
+		biosphere: Leaf,
+		climate: CloudSun,
+		cryosphere: Mountain,
+		land: Sprout,
+		ocean: Waves
+	} as const;
 
-	import '../styles.css';
+	let sel = $state<Selection>({ ...DEFAULT_SELECTION });
+	let ready = $state(false);
+	let showFarmer = $state(false);
+	let showMap = $state(false);
 
-	import type { ChartState } from '$lib/chart-types';
+	let status = $state<'loading' | 'done' | 'error'>('loading');
+	let errorMessage = $state('');
+	let analysis = $state<Analysis | null>(null);
+	let comparison = $state<Comparison | null>(null);
+	let compareState = $state<'idle' | 'loading' | 'done' | 'error'>('idle');
+	let available = $state<{ first: number; last: number } | null>(null);
+	let retry = $state(0);
+	let shareUrl = $state('');
 
-	let clippingPanel: ReturnType<typeof ClippingPanel>;
+	const assetBase = $derived(typeof location === 'undefined' ? base : `${location.origin}${base}`);
 
-	let mapContainer: HTMLElement | null;
-
-	const darkModeButton = new DarkModeButton();
-
-	// Before any data access: every request to the data API counts against the
-	// daily limit, and the wrapper also reroutes them once it is exhausted.
-	installRequestCounter();
-
-	// The timeline browses the satellite archive for days the forecast files do
-	// not exist for; while it does, the forecast frames are hidden rather than
-	// left on screen under the wrong date.
-	const gibsBrowseSubscription = gibsBrowse.subscribe(setWeatherLayersSuppressed);
-
-	// The single place that keeps the basemap in sync with the RESOLVED theme:
-	// covers the button cycle, an OS light/dark switch while the theme is
-	// 'system', and an embedder propagating its colour scheme into ours. The
-	// style only reloads when the resolved mode actually drifts from what the
-	// map has applied, so redundant transitions (e.g. picking 'system' on a
-	// dark OS while already dark) reload nothing.
-	$effect(() => {
-		const resolved = mode.current === 'dark' ? 'dark' : 'light';
-		void userPrefersMode.current; // icon shows the preference, not the resolved mode
-		if (!$map) return;
-		darkModeButton.refresh();
-		if (resolved !== getAppliedStyleMode()) {
-			reloadStyles();
+	const variable = $derived(
+		variableById(sel.variableId) ?? variableById(DEFAULT_SELECTION.variableId)!
+	);
+	const systemId = $derived(variable.system);
+	const system = $derived(EARTH_SYSTEMS.find((s) => s.id === systemId)!);
+	const allowedRegions = $derived(regionsFor(variable));
+	const allowedIds = $derived(new Set(allowedRegions.map((r) => r.id)));
+	const region = $derived<Region>(regionById(sel.regionId) ?? allowedRegions[0]);
+	const season = $derived(seasonById(sel.seasonId));
+	const regionGroups = $derived.by(() => {
+		// Local, non-reactive scratch map: rebuilt on every derivation.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
+		const groups = new Map<string, Region[]>();
+		for (const r of allowedRegions) {
+			const list = groups.get(r.group) ?? [];
+			list.push(r);
+			groups.set(r.group, list);
 		}
+		return [...groups];
+	});
+	const canTapMap = $derived(variable.source.kind !== 'regional');
+
+	const yearOptions = $derived.by(() => {
+		if (!available) return [];
+		const out: number[] = [];
+		for (let y = available.first; y <= available.last; y++) out.push(y);
+		return out;
 	});
 
-	onMount(async () => {
-		$url = new URL(document.location.href);
-		urlParamsToPreferences();
-		await initStoredState();
+	onMount(() => {
+		sel = normalise(parseSelection(new URLSearchParams(location.search)));
+		ready = true;
+		if (new URLSearchParams(location.search).get('story') === 'farmer') showFarmer = true;
+	});
 
-		initGibsState();
-		initReplayState();
-		await createMap(mapContainer as HTMLElement);
-		startEmbedderBridge();
+	/** Keep the region valid for the variable (switching to its preferred region when not). */
+	function normalise(next: Selection): Selection {
+		const v = variableById(next.variableId) ?? variableById(DEFAULT_SELECTION.variableId)!;
+		const ok = regionsFor(v);
+		const r = regionById(next.regionId);
+		const fits =
+			r &&
+			(ok.some((x) => x.id === r.id) || (r.group === 'Custom' && v.source.kind !== 'regional'));
+		if (!fits) {
+			const preferred = v.preferredRegion && ok.find((x) => x.id === v.preferredRegion);
+			next = { ...next, regionId: (preferred || ok[0])?.id ?? next.regionId };
+		}
+		return { ...next, variableId: v.id };
+	}
 
-		$map.on('load', async () => {
-			$map.addControl(darkModeButton);
-			$map.addControl(new SettingsButton());
-			$map.addControl(new HistoryButton());
-			$map.addControl(new PowerButton());
-			$map.addControl(new HelpButton());
-			$map.addControl(new ClippingButton());
+	function update(patch: Partial<Selection>, keepYears = false) {
+		const next = normalise({ ...sel, ...patch });
+		if (!keepYears && (patch.variableId || patch.regionId)) {
+			// A new dataset has its own record length: start from its full span.
+			if (patch.from === undefined) next.from = undefined;
+			if (patch.to === undefined) next.to = undefined;
+		}
+		sel = next;
+	}
 
-			if (getInitialMetaDataPromise) await getInitialMetaDataPromise;
-			// Initial URL-driven setup is finished; from now on domain changes are
-			// user-initiated and should reset the selected model run.
-			initialLoadComplete = true;
-
-			// Terrain DEM sources are registered only when the hillshade/terrain
-			// controls are enabled, avoiding unused terrain-source work on startup.
-			$map.addControl(new HillshadeButton());
-			clippingPanel?.initTerraDraw();
-
-			addOmFileLayers();
-			// Satellite history comes from a different provider (NASA GIBS) and
-			// lives below the forecast rasters; it survives style reloads on its own.
-			initGibsLayers();
-			addPopup();
-			changeOMfileURL();
-
-			watchAttributionOverlap();
-			postEmbedderReady();
+	function chooseSystem(id: SystemId) {
+		if (id === systemId) return;
+		const first = variablesForSystem(id)[0];
+		// A new Earth system is a new question: open it where its data means the
+		// most (snow in the Himalaya, sea ice in the Arctic), not where we were.
+		// Without a preferred region, keep a Bangladesh region or tapped point the
+		// user chose, and come back to Bangladesh from the Himalaya, Bay or Arctic.
+		const keep = region.group === 'Bangladesh' || region.group === 'Custom';
+		update({
+			variableId: first.id,
+			regionId: first.preferredRegion ?? (keep ? region.id : 'bangladesh')
 		});
+	}
+
+	function applyPreset(p: Preset) {
+		sel = normalise({ ...p.selection, mode: sel.mode });
+		showFarmer = false;
+		requestAnimationFrame(() =>
+			document.getElementById('results')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+		);
+	}
+
+	// Write the selection to the address bar, so every result is a shareable link.
+	$effect(() => {
+		if (!ready) return;
+		const query = selectionQuery(sel);
+		const url = `${location.pathname}?${query}`;
+		shareUrl = `${location.origin}${url}`;
+		try {
+			replaceState(url, {});
+		} catch {
+			history.replaceState(history.state, '', url);
+		}
 	});
 
-	let getInitialMetaDataPromise: Promise<void> | undefined;
-	// Guards the domain subscription so the very first domain change (driven by the
-	// URL on page load) does not discard a model_run/time that was just parsed from
-	// the URL. Only genuine, user-initiated domain switches should reset the run.
-	let initialLoadComplete = false;
-	const domainSubscription = domain.subscribe(async (newDomain) => {
-		if ($domain !== newDomain) {
-			await tick(); // await the selectedDomain to be set
-			updateUrl('domain', newDomain);
-			if (initialLoadComplete) {
-				$modelRun = undefined;
-				toast('Domain set to: ' + $selectedDomain.label);
-			}
-		}
-
-		getInitialMetaDataPromise = loadDomainMetaData(newDomain);
-		await getInitialMetaDataPromise;
-		changeOMfileURL();
+	// Run the analysis whenever the selection (but not the mode) changes.
+	$effect(() => {
+		if (!ready) return;
+		const req = {
+			variable,
+			region,
+			season,
+			from: sel.from,
+			to: sel.to,
+			assetBase
+		};
+		void retry;
+		const controller = new AbortController();
+		status = 'loading';
+		comparison = null;
+		compareState = 'idle';
+		runAnalysis({ ...req, signal: controller.signal })
+			.then((result) => {
+				analysis = result;
+				available = result.available;
+				status = 'done';
+				const related = compareSuggestions(result.variable, result.region).slice(0, 3);
+				if (!related.length) return;
+				compareState = 'loading';
+				return compareVariables(result, related, assetBase, controller.signal).then(
+					(c) => {
+						comparison = c;
+						compareState = 'done';
+					},
+					(e) => {
+						if ((e as Error).name !== 'AbortError') compareState = 'error';
+					}
+				);
+			})
+			.catch((e) => {
+				if ((e as Error).name === 'AbortError') return;
+				errorMessage = (e as Error).message || 'Something went wrong.';
+				status = 'error';
+			});
+		return () => controller.abort();
 	});
 
-	const chartToastMessage = (chart: ChartState): string => {
-		if (chart.presetId) {
-			return 'Chart set to: ' + (getChartPreset(chart.presetId)?.label ?? chart.presetId);
-		}
-		if (chart.name) return 'Chart set to: ' + chart.name;
-		if (chart.sources.length === 1) {
-			const variable = chart.sources[0].variable;
-			const label = variableOptions.find(({ value }) => value === variable)?.label ?? variable;
-			return 'Variable set to: ' + label;
-		}
-		return 'Custom chart applied';
-	};
+	const sites = $derived(analysis?.data.sample?.sites ?? []);
 
-	// Serialized sources of the last seen chart. Undefined only before the
-	// subscription's initial synchronous call, which must not toast or touch
-	// the URL (urlParamsToPreferences just parsed it).
-	let lastChartSources: string | undefined;
-	const chartSubscription = activeChart.subscribe(async (chart) => {
-		const serialized = JSON.stringify(chart.sources);
-		const changed = lastChartSources !== undefined && serialized !== lastChartSources;
-		lastChartSources = serialized;
-
-		if (changed) {
-			await tick();
-			syncChartToUrl(chart);
-			toast(chartToastMessage(chart));
-		}
-
-		changeOMfileURL();
-	});
-
-	onDestroy(() => {
-		gibsBrowseSubscription();
-		destroyGibsLayers();
-		stopEmbedderBridge();
-		unwatchAttributionOverlap();
-		if ($map) {
-			$map.remove();
-		}
-		domainSubscription(); // unsubscribe
-		chartSubscription(); // unsubscribe
-	});
+	function setMode(m: Mode) {
+		sel = { ...sel, mode: m };
+	}
 </script>
 
 <svelte:head>
-	<title>Open-Meteo Maps</title>
+	<title
+		>Earth System Trend Explorer by DIVERGENT · Find what changes. Understand what matters.</title
+	>
 </svelte:head>
 
-{#if $loading}
-	<Spinner />
-{/if}
+<div class="bg-background text-foreground min-h-dvh">
+	<a
+		href="#controls"
+		class="bg-primary text-primary-foreground sr-only z-50 rounded-md px-3 py-2 focus:not-sr-only focus:absolute focus:top-2 focus:left-2"
+		>Skip to the explorer</a
+	>
+	<SiteHeader current="explorer" />
 
-<div class="map maplibregl-map" id="#map_container" bind:this={mapContainer}></div>
+	<main class="mx-auto max-w-6xl px-3 pb-16 sm:px-5">
+		<!-- Intro -->
+		<section class="pt-5 pb-4 sm:pt-8" aria-labelledby="intro-title">
+			<p class="text-xs font-semibold tracking-wider text-sky-700 uppercase dark:text-sky-300">
+				NASA Space Apps Challenge 2026 · Team DIVERGENT · Rajshahi, Bangladesh
+			</p>
+			<h1 id="intro-title" class="mt-1 text-2xl font-bold tracking-tight text-balance sm:text-4xl">
+				Find what changes. Understand what matters.
+			</h1>
+			<p class="text-muted-foreground mt-2 max-w-3xl text-[0.95rem] sm:text-base">
+				Pick an Earth system, a variable, a place and a time period. We test 45 years of NASA Earth
+				observations and answer: what is changing, where, how much, when the major change happened,
+				whether it is statistically significant, and how reliable it is.
+			</p>
+			<div class="mt-4 flex flex-wrap gap-2">
+				<button
+					type="button"
+					class="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800"
+					onclick={() => (showFarmer = !showFarmer)}
+					aria-expanded={showFarmer}
+				>
+					<Sprout class="size-4" aria-hidden="true" />
+					{showFarmer ? 'Hide the farmer story' : 'Farmer story: rain, soil, crops'}
+				</button>
+				<a
+					href={`${base}/about`}
+					class="hover:bg-accent inline-flex min-h-11 items-center gap-2 rounded-lg border px-4 text-sm font-medium"
+				>
+					<BookOpen class="size-4" aria-hidden="true" />How it works
+				</a>
+			</div>
+			<div class="mt-4">
+				<p class="text-muted-foreground mb-1.5 text-xs font-medium">Try a question</p>
+				<div class="-mx-3 flex gap-2 overflow-x-auto px-3 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">
+					{#each QUICK_STARTS as q (q.id)}
+						{@const active =
+							sel.variableId === q.selection.variableId &&
+							sel.regionId === q.selection.regionId &&
+							sel.seasonId === q.selection.seasonId}
+						<button
+							type="button"
+							class="min-h-11 shrink-0 rounded-full border px-3.5 text-sm transition-colors {active
+								? 'border-sky-600 bg-sky-50 font-semibold text-sky-900 dark:bg-sky-950 dark:text-sky-100'
+								: 'hover:bg-accent'}"
+							aria-pressed={active}
+							onclick={() => applyPreset(q)}>{q.question}</button
+						>
+					{/each}
+				</div>
+			</div>
+		</section>
 
-<Scale />
-<SelectionPanel />
-<ClippingPanel bind:this={clippingPanel} />
-<HistoricalPanel />
-<PowerPanel />
-<TimeSelector />
-<Settings />
-<HelpDialog />
-<KeyboardHandler />
-<Dropzone
-	ondrop={(features) => {
-		clippingPanel?.addImportedFeatures(features);
-	}}
-/>
+		{#if showFarmer && ready}
+			<div class="mb-5">
+				<FarmerStory {assetBase} onopen={applyPreset} onclose={() => (showFarmer = false)} />
+			</div>
+		{/if}
+
+		<div class="grid grid-cols-1 gap-5 lg:grid-cols-[22rem_minmax(0,1fr)] lg:items-start">
+			<!-- Controls -->
+			<section
+				id="controls"
+				class="bg-card space-y-4 rounded-xl border p-4 shadow-sm lg:sticky lg:top-[4.25rem]"
+				aria-label="Choose what to analyse"
+			>
+				<div class="bg-muted grid grid-cols-2 rounded-lg p-1" role="group" aria-label="View">
+					{#each [{ id: 'everyday', label: 'Everyday' }, { id: 'research', label: 'Research' }] as m (m.id)}
+						<button
+							type="button"
+							class="min-h-10 rounded-md text-sm font-semibold transition-colors {sel.mode === m.id
+								? 'bg-background shadow-sm'
+								: 'text-muted-foreground'}"
+							aria-pressed={sel.mode === m.id}
+							onclick={() => setMode(m.id as Mode)}>{m.label}</button
+						>
+					{/each}
+				</div>
+				<p class="text-muted-foreground -mt-2 text-xs">
+					{sel.mode === 'everyday'
+						? 'Plain words and simple charts, for farmers, students and citizens.'
+						: 'Full statistics, maps of change, second dataset and test details.'}
+				</p>
+
+				<fieldset>
+					<legend class="text-sm font-semibold"
+						><span class="text-muted-foreground">1.</span> Earth system</legend
+					>
+					<div class="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-5 lg:grid-cols-3">
+						{#each EARTH_SYSTEMS as s (s.id)}
+							{@const Icon = SYSTEM_ICONS[s.id]}
+							<button
+								type="button"
+								class="flex min-h-16 flex-col items-center justify-center gap-1 rounded-lg border px-1 py-2 text-xs font-medium transition-colors {systemId ===
+								s.id
+									? 'border-sky-600 bg-sky-50 text-sky-900 dark:bg-sky-950 dark:text-sky-100'
+									: 'hover:bg-accent'}"
+								aria-pressed={systemId === s.id}
+								onclick={() => chooseSystem(s.id)}
+							>
+								<Icon class="size-5" aria-hidden="true" />
+								{s.name === 'Land Surface' ? 'Land' : s.name}
+							</button>
+						{/each}
+					</div>
+					<p class="text-muted-foreground mt-1.5 text-xs">
+						{sel.mode === 'everyday' ? system.everyday : system.description}
+					</p>
+				</fieldset>
+
+				<div>
+					<label for="variable" class="text-sm font-semibold"
+						><span class="text-muted-foreground">2.</span> Variable</label
+					>
+					<select
+						id="variable"
+						class="bg-background mt-1.5 min-h-11 w-full rounded-lg border px-3 text-sm"
+						value={variable.id}
+						onchange={(e) => update({ variableId: e.currentTarget.value })}
+					>
+						{#each variablesForSystem(systemId) as v (v.id)}
+							<option value={v.id}>{v.name}{v.dataset.live ? '' : ' (sample)'}</option>
+						{/each}
+					</select>
+					<p class="text-muted-foreground mt-1.5 text-xs">{variable.description}</p>
+				</div>
+
+				<div>
+					<label for="region" class="text-sm font-semibold"
+						><span class="text-muted-foreground">3.</span> Region</label
+					>
+					<select
+						id="region"
+						class="bg-background mt-1.5 min-h-11 w-full rounded-lg border px-3 text-sm"
+						value={region.id}
+						onchange={(e) => update({ regionId: e.currentTarget.value })}
+					>
+						{#if region.group === 'Custom'}
+							<option value={region.id}
+								>Point {formatLat(region.center[1])}, {formatLon(region.center[0])}</option
+							>
+						{/if}
+						{#each regionGroups as [group, list] (group)}
+							<optgroup label={group}>
+								{#each list as r (r.id)}
+									<option value={r.id}>{r.name}</option>
+								{/each}
+							</optgroup>
+						{/each}
+					</select>
+					<button
+						type="button"
+						class="hover:bg-accent mt-2 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border text-sm font-medium"
+						aria-expanded={showMap}
+						onclick={() => (showMap = !showMap)}
+					>
+						<MapIcon class="size-4" aria-hidden="true" />
+						{showMap
+							? 'Hide the map'
+							: canTapMap
+								? 'Choose on the map, or tap any point'
+								: 'Show on the map'}
+					</button>
+					{#if showMap}
+						<div class="mt-2">
+							<RegionMap
+								{region}
+								allowed={allowedIds}
+								{sites}
+								overlay={variable.overlay}
+								onselect={(id) => {
+									if (id.startsWith('point:') && !canTapMap) return;
+									update({ regionId: id });
+								}}
+							/>
+						</div>
+					{/if}
+				</div>
+
+				<fieldset>
+					<legend class="text-sm font-semibold"
+						><span class="text-muted-foreground">4.</span> Time period</legend
+					>
+					<label for="season" class="text-muted-foreground mt-1.5 block text-xs font-medium"
+						>Season</label
+					>
+					<select
+						id="season"
+						class="bg-background mt-1 min-h-11 w-full rounded-lg border px-3 text-sm"
+						value={sel.seasonId}
+						onchange={(e) => update({ seasonId: e.currentTarget.value }, true)}
+					>
+						{#each SEASONS as s (s.id)}
+							<option value={s.id}>{s.name}</option>
+						{/each}
+					</select>
+					<div class="mt-2 grid grid-cols-2 gap-2">
+						<div>
+							<label for="from" class="text-muted-foreground block text-xs font-medium">From</label>
+							<select
+								id="from"
+								class="bg-background mt-1 min-h-11 w-full rounded-lg border px-3 text-sm"
+								disabled={!yearOptions.length}
+								value={String(sel.from ?? analysis?.from ?? '')}
+								onchange={(e) => update({ from: Number(e.currentTarget.value) }, true)}
+							>
+								{#each yearOptions as y (y)}
+									<option value={String(y)} disabled={y > (sel.to ?? analysis?.to ?? 9999) - 7}
+										>{y}</option
+									>
+								{/each}
+							</select>
+						</div>
+						<div>
+							<label for="to" class="text-muted-foreground block text-xs font-medium">To</label>
+							<select
+								id="to"
+								class="bg-background mt-1 min-h-11 w-full rounded-lg border px-3 text-sm"
+								disabled={!yearOptions.length}
+								value={String(sel.to ?? analysis?.to ?? '')}
+								onchange={(e) => update({ to: Number(e.currentTarget.value) }, true)}
+							>
+								{#each yearOptions as y (y)}
+									<option value={String(y)} disabled={y < (sel.from ?? analysis?.from ?? 0) + 7}
+										>{y}</option
+									>
+								{/each}
+							</select>
+						</div>
+					</div>
+					{#if sel.from !== undefined || sel.to !== undefined}
+						<button
+							type="button"
+							class="text-muted-foreground mt-1 min-h-10 text-xs underline underline-offset-2"
+							onclick={() => update({ from: undefined, to: undefined }, true)}
+							>Use the full record</button
+						>
+					{/if}
+				</fieldset>
+			</section>
+
+			<!-- Results -->
+			<div
+				id="results"
+				class="min-w-0 scroll-mt-20"
+				aria-live="polite"
+				aria-busy={status === 'loading'}
+			>
+				{#if status === 'error'}
+					<div class="bg-card rounded-xl border p-5" role="alert">
+						<h2 class="font-semibold">This analysis could not be completed</h2>
+						<p class="text-muted-foreground mt-1 text-sm">{errorMessage}</p>
+						<div class="mt-3 flex flex-wrap gap-2">
+							<button
+								type="button"
+								class="hover:bg-accent inline-flex min-h-10 items-center gap-2 rounded-lg border px-3 text-sm font-medium"
+								onclick={() => retry++}
+							>
+								<RotateCw class="size-4" aria-hidden="true" />Try again
+							</button>
+							<button
+								type="button"
+								class="hover:bg-accent inline-flex min-h-10 items-center rounded-lg border px-3 text-sm font-medium"
+								onclick={() => applyPreset(QUICK_STARTS[0])}>Back to the Bangladesh example</button
+							>
+						</div>
+					</div>
+				{:else if analysis}
+					<div class:opacity-60={status === 'loading'} class="transition-opacity">
+						{#if status === 'loading'}
+							<p class="text-muted-foreground mb-2 text-sm" role="status">Updating…</p>
+						{/if}
+						<ResultsView {analysis} mode={sel.mode} {comparison} {compareState} {shareUrl} />
+					</div>
+				{:else}
+					<div class="space-y-4" role="status" aria-label="Loading the analysis">
+						<div class="bg-card rounded-xl border p-5">
+							<div class="bg-muted h-4 w-1/3 animate-pulse rounded"></div>
+							<div class="bg-muted mt-3 h-6 w-4/5 animate-pulse rounded"></div>
+							<div class="bg-muted mt-3 h-4 w-full animate-pulse rounded"></div>
+							<div class="bg-muted mt-2 h-4 w-2/3 animate-pulse rounded"></div>
+						</div>
+						<div class="bg-card h-72 animate-pulse rounded-xl border"></div>
+						<p class="text-muted-foreground text-sm">Loading NASA data and running the tests…</p>
+					</div>
+				{/if}
+			</div>
+		</div>
+	</main>
+
+	<footer class="border-t">
+		<div class="text-muted-foreground mx-auto max-w-6xl space-y-1 px-3 py-6 text-xs sm:px-5">
+			<p>
+				Earth System Trend Explorer by team DIVERGENT for the NASA Space Apps Challenge 2026. Data:
+				NASA POWER (MERRA-2, CERES), GPM IMERG, MODIS, GISTEMP, GIBS, NSIDC, with ERA5 and NOAA PSL
+				as independent checks.
+			</p>
+			<p>
+				NASA does not endorse this project. Trends describe the data, not their causes.
+				<a class="underline underline-offset-2" href={`${base}/about`}>Methods and limitations</a> ·
+				<a
+					class="underline underline-offset-2"
+					href="https://github.com/AKIBUZZAMAN-AKIB/nasa"
+					rel="noopener">Source code</a
+				>
+				·
+				<a class="underline underline-offset-2" href={`${base}/weather`}>Live weather map</a>
+			</p>
+		</div>
+	</footer>
+</div>

@@ -8,8 +8,9 @@ import { execSync } from 'child_process';
 // the `__sveltekit_*` globals stop matching, and hydration crashes on every
 // page (breaking client-side routing in production).
 const buildVersion = () => {
-	// commit sha provided by Cloudflare CI (Workers Builds / Pages)
-	const sha = process.env.WORKERS_CI_COMMIT_SHA ?? process.env.CF_PAGES_COMMIT_SHA;
+	// commit sha provided by GitHub Actions or Cloudflare CI
+	const sha =
+		process.env.GITHUB_SHA ?? process.env.WORKERS_CI_COMMIT_SHA ?? process.env.CF_PAGES_COMMIT_SHA;
 	if (sha) return sha;
 	try {
 		return execSync('git rev-parse HEAD', { encoding: 'utf-8' }).trim();
@@ -25,6 +26,10 @@ const config = {
 		modernAst: true
 	},
 	kit: {
+		// GitHub Pages serves the site from /<repo>; the deploy workflow sets BASE_PATH.
+		paths: {
+			base: process.env.BASE_PATH ?? ''
+		},
 		adapter: adapter({
 			pages: 'build',
 			assets: 'build',

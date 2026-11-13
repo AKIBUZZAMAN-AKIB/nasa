@@ -504,3 +504,22 @@ body .maplibregl-ctrl-bottom-right .maplibregl-ctrl.maplibre-maptoolkit-logo-con
 	border: none !important;
 	background: none !important;
 }
+
+/* Earth System Trend Explorer */
+:root {
+	--trend-main: #1d4ed8;
+	--trend-line: #c2410c;
+	--trend-change: #7c3aed;
+	--trend-ref: #0f766e;
+	--trend-up: #b91c1c;
+	--trend-down: #1d4ed8;
+}
+
+.dark {
+	--trend-main: #60a5fa;
+	--trend-line: #fb923c;
+	--trend-change: #c4b5fd;
+	--trend-ref: #2dd4bf;
+	--trend-up: #f87171;
+	--trend-down: #60a5fa;
+}
