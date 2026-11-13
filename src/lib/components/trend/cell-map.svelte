@@ -94,13 +94,9 @@
 			{@const y0 = py(cell.lat + CELL_LAT / 2)}
 			{@const w = px(cell.lon + CELL_LON / 2) - x0}
 			{@const h = py(cell.lat - CELL_LAT / 2) - y0}
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<g
-				role="button"
-				tabindex="-1"
-				onclick={() => (selected = selected === i ? null : i)}
-				class="cursor-pointer"
-			>
+			<!-- Pointer shortcut only: every cell's value is also in the table and the CSV. -->
+			<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+			<g onclick={() => (selected = selected === i ? null : i)} class="cursor-pointer">
 				<rect
 					x={x0}
 					y={y0}

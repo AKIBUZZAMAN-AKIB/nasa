@@ -13,6 +13,22 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Public Sans, the US government typeface NASA sites use, self-hosted (Latin only:
+   the app is English). font-display: optional plus the preload in +layout.svelte:
+   the font is used whenever it arrives with the page, and a slow first visit keeps
+   the system font instead of reflowing the text or delaying the first paint. */
+@font-face {
+	font-family: 'Public Sans Variable';
+	font-style: normal;
+	font-display: optional;
+	font-weight: 100 900;
+	src: url('../node_modules/@fontsource-variable/public-sans/files/public-sans-latin-wght-normal.woff2')
+		format('woff2-variations');
+	unicode-range:
+		U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+		U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 /* =============================================================================
    Theme Configuration
    ============================================================================= */
@@ -27,26 +43,32 @@
 
 /* Light mode color tokens */
 :root {
-	--radius: 0.625rem;
-	--background: oklch(1 0 0);
-	--foreground: oklch(0.129 0.042 264.695);
+	/* DIVERGENT design system: cool neutrals, NASA-blue primary, teal accent.
+	   Every text pair meets WCAG AA (4.5:1); muted text on --muted too. */
+	--radius: 0.75rem;
+	--background: oklch(0.985 0.004 247);
+	--foreground: oklch(0.22 0.035 258);
 	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.129 0.042 264.695);
+	--card-foreground: oklch(0.22 0.035 258);
 	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.129 0.042 264.695);
+	--popover-foreground: oklch(0.22 0.035 258);
 	--glass: rgba(240, 240, 240);
-	--primary: oklch(0.208 0.042 265.755);
-	--primary-foreground: oklch(0.984 0.003 247.858);
-	--secondary: oklch(0.968 0.007 247.896);
-	--secondary-foreground: oklch(0.208 0.042 265.755);
-	--muted: oklch(0.968 0.007 247.896);
-	--muted-foreground: oklch(0.554 0.046 257.417);
-	--accent: oklch(0.968 0.007 247.896);
-	--accent-foreground: oklch(0.208 0.042 265.755);
-	--destructive: oklch(0.577 0.245 27.325);
-	--border: oklch(0.929 0.013 255.508);
-	--input: oklch(0.929 0.013 255.508);
-	--ring: oklch(0.704 0.04 256.788);
+	--primary: oklch(0.42 0.14 258);
+	--primary-foreground: oklch(0.99 0.003 247);
+	--secondary: oklch(0.955 0.012 250);
+	--secondary-foreground: oklch(0.28 0.06 258);
+	--muted: oklch(0.955 0.01 250);
+	--muted-foreground: oklch(0.47 0.03 257);
+	--accent: oklch(0.945 0.016 245);
+	--accent-foreground: oklch(0.28 0.06 258);
+	--destructive: oklch(0.53 0.2 27);
+	--border: oklch(0.9 0.014 252);
+	--input: oklch(0.86 0.018 252);
+	--ring: oklch(0.55 0.15 255);
+	--brand: oklch(0.47 0.15 255);
+	--brand-soft: oklch(0.95 0.03 245);
+	--brand-ink: oklch(0.32 0.11 258);
+	--eyebrow: oklch(0.45 0.1 220);
 	--chart-1: oklch(0.646 0.222 41.116);
 	--chart-2: oklch(0.6 0.118 184.704);
 	--chart-3: oklch(0.398 0.07 227.392);
@@ -63,25 +85,29 @@
 }
 
 .dark {
-	--background: oklch(0.129 0.042 264.695);
-	--foreground: oklch(0.984 0.003 247.858);
-	--card: oklch(0.208 0.042 265.755);
-	--card-foreground: oklch(0.984 0.003 247.858);
-	--popover: oklch(0.208 0.042 265.755);
-	--popover-foreground: oklch(0.984 0.003 247.858);
+	--background: oklch(0.17 0.025 258);
+	--foreground: oklch(0.96 0.006 250);
+	--card: oklch(0.21 0.03 258);
+	--card-foreground: oklch(0.96 0.006 250);
+	--popover: oklch(0.21 0.03 258);
+	--popover-foreground: oklch(0.96 0.006 250);
 	--glass: rgba(15, 15, 15);
-	--primary: oklch(0.929 0.013 255.508);
-	--primary-foreground: oklch(0.208 0.042 265.755);
-	--secondary: oklch(0.279 0.041 260.031);
-	--secondary-foreground: oklch(0.984 0.003 247.858);
-	--muted: oklch(0.279 0.041 260.031);
-	--muted-foreground: oklch(0.704 0.04 256.788);
-	--accent: oklch(0.279 0.041 260.031);
-	--accent-foreground: oklch(0.984 0.003 247.858);
-	--destructive: oklch(0.704 0.191 22.216);
-	--border: oklch(1 0 0 / 10%);
-	--input: oklch(1 0 0 / 15%);
-	--ring: oklch(0.551 0.027 264.364);
+	--primary: oklch(0.8 0.1 245);
+	--primary-foreground: oklch(0.2 0.04 258);
+	--secondary: oklch(0.27 0.035 258);
+	--secondary-foreground: oklch(0.96 0.006 250);
+	--muted: oklch(0.26 0.03 258);
+	--muted-foreground: oklch(0.75 0.03 252);
+	--accent: oklch(0.28 0.04 258);
+	--accent-foreground: oklch(0.96 0.006 250);
+	--destructive: oklch(0.7 0.17 25);
+	--border: oklch(0.32 0.03 258);
+	--input: oklch(0.38 0.035 258);
+	--ring: oklch(0.75 0.12 245);
+	--brand: oklch(0.75 0.12 240);
+	--brand-soft: oklch(0.3 0.06 250);
+	--brand-ink: oklch(0.93 0.04 240);
+	--eyebrow: oklch(0.82 0.09 210);
 	--chart-1: oklch(0.488 0.243 264.376);
 	--chart-2: oklch(0.696 0.17 162.48);
 	--chart-3: oklch(0.769 0.188 70.08);
@@ -122,6 +148,12 @@
 	--color-border: var(--border);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
+	--color-brand: var(--brand);
+	--color-brand-soft: var(--brand-soft);
+	--color-brand-ink: var(--brand-ink);
+	--color-eyebrow: var(--eyebrow);
+	--font-sans:
+		'Public Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 	--color-chart-1: var(--chart-1);
 	--color-chart-2: var(--chart-2);
 	--color-chart-3: var(--chart-3);
@@ -145,8 +177,8 @@
 
 :root {
 	font-family:
-		ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
-		'Noto Color Emoji';
+		'Public Sans Variable', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
+		'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
 
 	color-scheme: light dark;
 	color: rgba(255, 255, 255, 0.87);
@@ -176,10 +208,13 @@
 	}
 }
 
+/* The live weather map fills the screen; dvh follows mobile browser bars. */
 #map_container {
-	position: relative;
+	position: fixed;
+	inset: 0;
 	width: 100%;
-	height: 100%;
+	height: 100vh;
+	height: 100dvh;
 }
 
 .map {
@@ -222,6 +257,26 @@
 /* Control positioning */
 .maplibregl-ctrl-top-right {
 	top: 36px;
+}
+
+/* The right-hand button stack wraps into a second column instead of running
+   off the bottom of a short screen (a phone held sideways), and stays clear
+   of the credits corner. */
+.maplibregl-ctrl-top-right {
+	display: flex;
+	flex-direction: column;
+	flex-wrap: wrap-reverse;
+	align-items: flex-end;
+	align-content: flex-start;
+	max-height: calc(100% - 84px);
+}
+
+/* Fingers need bigger map buttons than a mouse does: 44 px on touch screens. */
+@media (pointer: coarse) {
+	.maplibregl-map .maplibregl-ctrl-group button {
+		width: 44px;
+		height: 44px;
+	}
 }
 
 /* The credits corner (copyright line, plus the Maptoolkit logo when that
@@ -507,19 +562,107 @@ body .maplibregl-ctrl-bottom-right .maplibregl-ctrl.maplibre-maptoolkit-logo-con
 
 /* Earth System Trend Explorer */
 :root {
-	--trend-main: #1d4ed8;
-	--trend-line: #c2410c;
-	--trend-change: #7c3aed;
-	--trend-ref: #0f766e;
-	--trend-up: #b91c1c;
-	--trend-down: #1d4ed8;
+	/* Okabe-Ito based chart palette (colour-blind safe), darkened where needed
+	   so every line and mark keeps 3:1 contrast on white (WCAG 1.4.11). */
+	--trend-main: #0b5cad;
+	--trend-line: #c24e00;
+	--trend-change: #a0457e;
+	--trend-ref: #00806a;
+	--trend-up: #b42318;
+	--trend-down: #0b5cad;
+	--trend-band: rgb(11 92 173 / 0.12);
 }
 
 .dark {
-	--trend-main: #60a5fa;
-	--trend-line: #fb923c;
-	--trend-change: #c4b5fd;
-	--trend-ref: #2dd4bf;
-	--trend-up: #f87171;
-	--trend-down: #60a5fa;
+	--trend-main: #6cbcf0;
+	--trend-line: #f2994a;
+	--trend-change: #e3a0cc;
+	--trend-ref: #3fcaa3;
+	--trend-up: #ff8f84;
+	--trend-down: #6cbcf0;
+	--trend-band: rgb(108 188 240 / 0.16);
+}
+
+/* Explorer polish: focus, motion, numerals, print */
+.trend-app :focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+.trend-app {
+	font-feature-settings: 'tnum' 0;
+}
+.tabular {
+	font-variant-numeric: tabular-nums;
+}
+@keyframes trend-fade-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+.trend-enter {
+	animation: trend-fade-in 0.28s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+	.trend-enter {
+		animation: none;
+	}
+	.trend-app * {
+		scroll-behavior: auto !important;
+		transition-duration: 0.01ms !important;
+	}
+}
+@media print {
+	.trend-app header,
+	.trend-app footer,
+	.trend-app #controls,
+	.trend-app [data-no-print],
+	.trend-app .skip-link {
+		display: none !important;
+	}
+	.trend-app main {
+		max-width: none !important;
+		padding: 0 !important;
+	}
+	.trend-app main > div {
+		display: block !important;
+	}
+	.trend-app section,
+	.trend-app figure,
+	.trend-app [data-print-block] {
+		break-inside: avoid;
+		box-shadow: none !important;
+	}
+	.trend-app details {
+		display: block;
+	}
+	.trend-app details > *:not(summary) {
+		display: block !important;
+	}
+	.trend-app [data-print-only] {
+		display: block !important;
+	}
+	html,
+	body {
+		background: #fff !important;
+	}
+}
+[data-print-only] {
+	display: none;
+}
+
+/* Map zoom buttons in the explorer: 44 px touch targets */
+.trend-app .maplibregl-ctrl-group button {
+	width: 44px;
+	height: 44px;
+}
+
+/* First-visit tour: hidden before the first paint for shared links and
+   returning visitors (see app.html). */
+.intro-done [data-intro] {
+	display: none;
 }

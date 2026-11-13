@@ -91,7 +91,7 @@
 		</div>
 		<button
 			type="button"
-			class="hover:bg-accent -m-1 inline-flex size-10 shrink-0 items-center justify-center rounded-md"
+			class="hover:bg-accent -m-1.5 inline-flex size-11 shrink-0 items-center justify-center rounded-md"
 			onclick={onclose}
 			aria-label="Close the farmer story"
 		>

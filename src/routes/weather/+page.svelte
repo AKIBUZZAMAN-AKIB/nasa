@@ -193,7 +193,7 @@
 	<Spinner />
 {/if}
 
-<div class="map maplibregl-map" id="#map_container" bind:this={mapContainer}></div>
+<div class="map maplibregl-map" id="map_container" bind:this={mapContainer}></div>
 
 <Scale />
 <SelectionPanel />

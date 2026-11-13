@@ -153,8 +153,11 @@
 			</text>
 		{/each}
 		{#each xTicks as t (t)}
-			<text x={x(t)} y={height - 8} text-anchor="middle" class="fill-muted-foreground text-[11px]"
-				>{t}</text
+			<text
+				x={x(t)}
+				y={height - 8}
+				text-anchor={x(t) > width - 16 ? 'end' : x(t) < 16 ? 'start' : 'middle'}
+				class="fill-muted-foreground text-[11px]">{t}</text
 			>
 		{/each}
 		<text x={4} y={10} class="fill-muted-foreground text-[10px]">{unit}</text>
@@ -169,9 +172,12 @@
 				stroke-width="1.5"
 				stroke-dasharray="4 3"
 			/>
+			{@const cx = x(changeYear - 0.5)}
+			{@const flip = cx > margin.left + innerW - 76}
 			<text
-				x={x(changeYear - 0.5) + 4}
+				x={flip ? cx - 4 : cx + 4}
 				y={margin.top + 10}
+				text-anchor={flip ? 'end' : 'start'}
 				class="text-[11px] font-medium"
 				fill="var(--trend-change)">change {changeYear}</text
 			>

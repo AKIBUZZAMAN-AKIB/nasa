@@ -1,4 +1,5 @@
 <script lang="ts">
+	import publicSansLatin from '@fontsource-variable/public-sans/files/public-sans-latin-wght-normal.woff2?url';
 	import { ModeWatcher } from 'mode-watcher';
 	import { toast } from 'svelte-sonner';
 
@@ -21,6 +22,11 @@
 		});
 	});
 </script>
+
+<svelte:head>
+	<!-- Fetch the (English) font with the page so text does not reflow when it arrives. -->
+	<link rel="preload" href={publicSansLatin} as="font" type="font/woff2" crossorigin="anonymous" />
+</svelte:head>
 
 <Toaster closeButton={true} richColors={true} />
 

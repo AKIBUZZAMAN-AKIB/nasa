@@ -89,7 +89,8 @@
 	bind:this={panelEl}
 	class="absolute top-2.5 z-70 flex gap-2.5 duration-300 {extended ? 'left-2.5' : '-left-64.5'}"
 >
-	<div class="flex w-64 flex-col gap-2.5">
+	<!-- Closed, the panel slides off screen: inert keeps keyboard focus out of it. -->
+	<div class="flex w-64 flex-col gap-2.5" inert={!extended}>
 		<!-- The domain is a separate choice from what is drawn on it, and it is
 		     what every list below is filtered by, so it sits on its own card -->
 		<div

@@ -28,6 +28,16 @@
 			content="Find what changes. Understand what matters. Evidence-based trends from NASA Earth data."
 		/>
 		<meta name="twitter:image" content="https://akibuzzaman-akib.github.io/nasa/og-image.png" />
+		<script>
+			// Hide the first-visit tour before the first paint when it is not needed
+			// (a shared link, or a visitor who already closed it), so the page never jumps.
+			try {
+				if (location.search || localStorage.getItem('trend-intro-dismissed') === '1')
+					document.documentElement.classList.add('intro-done');
+			} catch (e) {
+				document.documentElement.classList.add('intro-done');
+			}
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

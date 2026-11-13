@@ -263,10 +263,12 @@
 			The map could not load. You can still choose a region from the list.
 		</div>
 	{/if}
-	<div class="absolute top-2 left-2 flex flex-wrap gap-1.5">
+	<div
+		class="pointer-events-none absolute top-2 right-16 left-2 flex flex-wrap gap-1.5 [&>*]:pointer-events-auto"
+	>
 		<button
 			type="button"
-			class="bg-background/95 min-h-9 rounded-md border px-2.5 text-xs font-medium shadow-sm {pointMode
+			class="bg-background/95 min-h-11 rounded-md border px-3 text-xs font-medium shadow-sm {pointMode
 				? 'border-primary text-primary'
 				: ''}"
 			aria-pressed={pointMode}
@@ -277,7 +279,7 @@
 		{#if overlay}
 			<button
 				type="button"
-				class="bg-background/95 min-h-9 rounded-md border px-2.5 text-xs font-medium shadow-sm {showOverlay
+				class="bg-background/95 min-h-11 rounded-md border px-3 text-xs font-medium shadow-sm {showOverlay
 					? 'border-primary text-primary'
 					: ''}"
 				aria-pressed={showOverlay}
