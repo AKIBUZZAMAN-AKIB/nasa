@@ -4,6 +4,8 @@
 
 > Find what changes. Understand what matters.
 
+**Demo video:** [watch the 4-minute demo](docs/video/DIVERGENT_demo_video.mp4) (1080p, 3:59)
+
 An evidence-based web app that turns NASA Earth observation records into clear, honest answers about how Earth is changing, for researchers and for farmers, students and citizens alike. It runs fully in the browser: no server, no login, no install.
 
 ![The explorer on a phone and on a desktop](docs/screenshots/hero.png)
